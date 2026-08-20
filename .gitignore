@@ -23,3 +23,10 @@ override.tf.json
 *_override.tf.json
 
 .vscode
+
+# machine-specific local port remap
+docker-compose.override.yml
+
+# python
+__pycache__/
+
