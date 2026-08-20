@@ -1,0 +1,8 @@
+# Python — the repo root .gitignore is Rust-oriented and does not cover these.
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+.env

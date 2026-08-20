@@ -1,0 +1,58 @@
+# Local Tokenix stack: gateway + analytics + TimescaleDB.
+#
+# Note: this repo is a fork of the Helicone Rust gateway, which has its own
+# compose files under infrastructure/. This file builds the *Python* Tokenix
+# services under apps/ and does not touch the Rust crate.
+
+services:
+  gateway:
+    build: ./apps/gateway
+    ports:
+      - "8080:8080"
+    environment:
+      DATABASE_URL: postgresql://tokenix:tokenix@db:5432/tokenix
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?set ENCRYPTION_KEY in .env - generate with "python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""}
+      ADMIN_TOKEN: ${ADMIN_TOKEN:-local-dev-admin-token}
+      ACPI_PRICES_PATH: /data/acpi_prices.json
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      # The ACPI dataset is synced in from the tokenix index pipeline; mounting
+      # it read-only means an hourly refresh needs no rebuild or restart.
+      - ./data:/data:ro
+    depends_on:
+      db:
+        condition: service_healthy
+
+  analytics:
+    build: ./apps/analytics-api
+    ports:
+      - "8001:8001"
+    environment:
+      DATABASE_URL: postgresql://tokenix:tokenix@db:5432/tokenix
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:3000}
+    depends_on:
+      db:
+        condition: service_healthy
+
+  db:
+    image: timescale/timescaledb:latest-pg15
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: tokenix
+      POSTGRES_USER: tokenix
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-tokenix}
+    volumes:
+      - tokenix_pgdata:/var/lib/postgresql/data
+      # Files here run once, in name order, on an empty data directory.
+      - ./sql:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # Gate the app containers on the DB actually accepting queries, not just
+      # on the port being open.
+      test: ["CMD-SHELL", "pg_isready -U tokenix -d tokenix"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  tokenix_pgdata:
