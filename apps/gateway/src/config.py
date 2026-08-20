@@ -6,7 +6,13 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-_REPO_ROOT = Path(__file__).resolve().parents[3]
+_HERE = Path(__file__).resolve()
+# From a checkout this file is apps/gateway/src/config.py, so the repo root is
+# four levels up. The Docker image copies only `src`, leaving /app/src/config.py
+# with no fourth parent — indexing blindly would raise at import and kill the
+# container on boot. Fall back to the app directory there; compose sets
+# ACPI_PRICES_PATH explicitly anyway.
+_REPO_ROOT = _HERE.parents[3] if len(_HERE.parents) > 3 else _HERE.parents[1]
 
 
 def _env(name: str, default: str) -> str:
