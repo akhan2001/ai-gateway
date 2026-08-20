@@ -18,7 +18,9 @@ services:
     volumes:
       # The ACPI dataset is synced in from the tokenix index pipeline; mounting
       # it read-only means an hourly refresh needs no rebuild or restart.
-      - ./data:/data:ro
+      # It lives under apps/gateway/ so it is also inside the image's build
+      # context - platforms that run the image without a mount need it baked in.
+      - ./apps/gateway/data:/data:ro
     depends_on:
       db:
         condition: service_healthy

@@ -21,7 +21,7 @@ pure Python and do not touch the Rust crate** — `ai-gateway/`, `crates/` and
 apps/gateway/         FastAPI + httpx proxy
 apps/analytics-api/   FastAPI read API for the dashboard
 sql/001_schema.sql    TimescaleDB schema (runs on first DB boot)
-data/acpi_prices.json ACPI dataset, synced from the index pipeline
+apps/gateway/data/     ACPI dataset, synced from the index pipeline
 tools/                dataset exporter
 docker-compose.yml    gateway + analytics + TimescaleDB
 ```
@@ -130,14 +130,22 @@ unknown model is never silently reported as free.
 
 ```bash
 # in the tokenix repo
-python scripts/acpi.py && python scripts/export_prices.py
+python scripts/acpi.py
 
 # here
 python tools/export_acpi_prices.py --source ../tokenix/dashboard/data
 ```
 
+It reads `prices.csv`, the full variant-deduplicated catalog — not
+`prices_latest.csv`, which is the narrower calculator cut. A model missing from
+this file is recorded `priced = false` and excluded from every analytics query,
+so it disappears from spend rather than showing up wrong.
+
 The gateway re-reads the file every `ACPI_REFRESH_SECONDS` (default 1h), so an
-hourly sync needs no restart. `data/` is mounted read-only into the container.
+hourly sync needs no restart locally, where compose mounts
+`apps/gateway/data/` read-only over `/data`. The same directory is inside the
+image's build context and is COPYied in, which is what platforms that run the
+image without a mount (Railway) load from — there, refreshing means redeploying.
 
 `acpi_score` is the index's **P1 intelligence-per-dollar** metric carried
 through verbatim, not a rescaled 0–10 rating. Models without benchmark data

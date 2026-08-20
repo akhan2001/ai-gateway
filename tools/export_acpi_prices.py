@@ -4,8 +4,16 @@
 The gateway prices every proxied request from a single JSON file. This script
 produces that file out of what the index pipeline already writes:
 
-  dashboard/data/prices_latest.csv  -> per-model input/output rates + scores
+  dashboard/data/prices.csv         -> per-model input/output rates + scores
   dashboard/data/acpi_latest.json   -> the headline market rate
+
+Note it reads `prices.csv`, the full variant-deduplicated catalog, and NOT
+`prices_latest.csv`. The latter is the *calculator cut*: narrowed to major
+providers and one row per model, which is right for a buyer comparing options
+and wrong here. The gateway has to price whatever model a customer actually
+sends, and anything missing from this file is recorded `priced = false` and
+then excluded from every analytics query - it would silently vanish from spend
+rather than show up wrong.
 
 Run it after the pipeline, and sync the result to wherever the gateway mounts
 `ACPI_PRICES_PATH`:
@@ -14,7 +22,7 @@ Run it after the pipeline, and sync the result to wherever the gateway mounts
     python scripts/export_prices.py              # in the tokenix repo
     python tools/export_acpi_prices.py \
         --source ../tokenix/dashboard/data \
-        --out data/acpi_prices.json
+        --out apps/gateway/data/acpi_prices.json
 
 A note on `acpi_score`: it is the index's **P1 intelligence-per-dollar** metric
 carried through verbatim, not a rescaled 0-10 rating. Higher is better, but the
@@ -32,7 +40,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 DEFAULT_SOURCE = Path("../tokenix/dashboard/data")
-DEFAULT_OUT = Path("data/acpi_prices.json")
+# Inside apps/gateway/ so the file lands in the gateway image's build
+# context: Railway builds with that directory as the root, which puts a
+# repo-root data/ out of reach of COPY.
+DEFAULT_OUT = Path("apps/gateway/data/acpi_prices.json")
 
 
 def parse_optional_float(raw: object) -> float | None:
@@ -46,7 +57,7 @@ def parse_optional_float(raw: object) -> float | None:
 
 
 def build(source: Path, out: Path) -> int:
-    prices_csv = source / "prices_latest.csv"
+    prices_csv = source / "prices.csv"
     acpi_json = source / "acpi_latest.json"
 
     if not prices_csv.exists():
