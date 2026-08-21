@@ -16,9 +16,13 @@ and sign in on /connect with the key below.
 NOT for deployment: the numbers are invented and the key is public.
 """
 
+import os
+import secrets
+import uuid
 from datetime import date, timedelta
 
 from fastapi import FastAPI, Header, HTTPException
+from pydantic import BaseModel
 
 app = FastAPI()
 GOOD = "txk-test-key"
@@ -150,3 +154,98 @@ async def forecast(authorization: str | None = Header(default=None)):
         "months_of_history": 4,
         "low_confidence": False,
     }
+
+
+# ── Clerk self-serve provisioning ───────────────────────────────────────────
+#
+# Mirrors the real API's paths, auth and shapes exactly — a stub that answers
+# on different routes, or with weaker auth, tests something that does not
+# exist. So: /api/v1/internal/*, gated by x-internal-token, and the Clerk user
+# id is a parameter rather than a trusted header. Trusting an x-clerk-user-id
+# header would let any caller read any workspace by naming its owner, and a
+# stub that allowed it would hide that bug rather than surface it.
+#
+# /admin/workspaces is the GATEWAY's endpoint, not analytics'. It lives here so
+# one process can stand in for both locally: point TOKENIX_GATEWAY_URL and
+# TOKENIX_ANALYTICS_URL at this server and the whole first-visit flow runs
+# without Docker.
+
+INTERNAL_TOKEN = os.getenv("INTERNAL_API_TOKEN", "stub-internal-token")
+ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "local-dev-admin-token")
+
+# clerk_user_id -> workspace. In memory: restarting the stub is how you get a
+# fresh signup to test again.
+_LINKS: dict[str, dict] = {}
+_WORKSPACES: dict[str, dict] = {}
+
+
+def _check_internal(token: str | None) -> None:
+    if not token or not secrets.compare_digest(token, INTERNAL_TOKEN):
+        raise HTTPException(status_code=401, detail="Invalid internal token")
+
+
+class StubLink(BaseModel):
+    clerk_user_id: str
+    workspace_id: str
+    email: str | None = None
+
+
+class StubWorkspace(BaseModel):
+    name: str
+
+
+@app.post("/admin/workspaces")
+async def create_workspace(
+    body: StubWorkspace,
+    x_admin_token: str | None = Header(default=None),
+):
+    """Stands in for the gateway's admin endpoint."""
+    if not x_admin_token or not secrets.compare_digest(x_admin_token, ADMIN_TOKEN):
+        raise HTTPException(status_code=401, detail="Invalid admin token")
+    workspace_id = str(uuid.uuid4())
+    # Random like the real one, so nothing can come to depend on a fixed value.
+    api_key = "txk-" + secrets.token_urlsafe(32)
+    _WORKSPACES[workspace_id] = {"name": body.name, "key_prefix": api_key[:12]}
+    return {
+        "workspace_id": workspace_id,
+        "name": body.name,
+        "api_key": api_key,
+        "warning": "Store this key now. It cannot be retrieved again.",
+    }
+
+
+@app.get("/api/v1/internal/workspaces/me")
+async def workspace_for_clerk_user(
+    clerk_user_id: str,
+    x_internal_token: str | None = Header(default=None),
+):
+    _check_internal(x_internal_token)
+    link = _LINKS.get(clerk_user_id)
+    if link is None:
+        raise HTTPException(status_code=404, detail="No workspace for that user")
+    workspace = _WORKSPACES.get(link["workspace_id"], {})
+    return {
+        "workspace_id": link["workspace_id"],
+        "name": workspace.get("name", "Stub workspace"),
+        "email": link.get("email"),
+        # Prefix only. The plaintext is returned once by /admin/workspaces and
+        # is not kept here either, exactly as in production.
+        "key_prefix": workspace.get("key_prefix"),
+        "created_at": "2026-08-20T00:00:00+00:00",
+    }
+
+
+@app.post("/api/v1/internal/workspaces/link")
+async def link_workspace(
+    body: StubLink,
+    x_internal_token: str | None = Header(default=None),
+):
+    _check_internal(x_internal_token)
+    existing = _LINKS.get(body.clerk_user_id)
+    if existing is not None:
+        return {"workspace_id": existing["workspace_id"], "created_link": False}
+    _LINKS[body.clerk_user_id] = {
+        "workspace_id": body.workspace_id,
+        "email": body.email,
+    }
+    return {"workspace_id": body.workspace_id, "created_link": True}
