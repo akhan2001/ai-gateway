@@ -213,3 +213,84 @@ async def create_workspace_for_clerk_user(
         "created": True,
         "warning": "Store this key now. It cannot be retrieved again.",
     }
+
+
+class LinkKeyRequest(BaseModel):
+    clerk_user_id: str
+    txk_key: str
+
+
+@router.post("/workspaces/link-key")
+async def link_existing_key(
+    body: LinkKeyRequest,
+    x_internal_token: str | None = Header(default=None),
+) -> dict:
+    """Claim an existing workspace by presenting its `txk-` key.
+
+    For customers provisioned before Clerk: their workspace has no
+    clerk_user_id, so signing in would otherwise strand their history behind a
+    fresh empty workspace.
+
+    Possession of the key IS the proof of ownership — it is the same secret
+    that authorises spending money through the gateway, so anyone holding it
+    already controls the workspace. Brute force is not a concern at 32 bytes of
+    CSPRNG entropy, and the lookup is by hash, so an invalid key is
+    indistinguishable from a nonexistent one.
+
+    Separate from /workspaces/link, which asserts a workspace id the server
+    just created. The two prove ownership in different ways and should not
+    share a handler.
+    """
+    _authorize(x_internal_token)
+
+    raw_key = body.txk_key.strip()
+    if not raw_key.startswith("txk-"):
+        raise HTTPException(status_code=400, detail="That is not a Tokenix key")
+
+    row = await db.fetchrow(
+        """
+        SELECT w.id, w.name, w.clerk_user_id, k.key_prefix
+        FROM api_keys k
+        JOIN workspaces w ON w.id = k.workspace_id
+        WHERE k.key_hash = $1 AND NOT k.revoked AND w.enabled
+        """,
+        _hash_key(raw_key),
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="That key was not recognised")
+
+    owner = row["clerk_user_id"]
+    if owner is not None and owner != body.clerk_user_id:
+        # Someone else's linked workspace. Refuse rather than steal it.
+        raise HTTPException(
+            status_code=409,
+            detail="That workspace is already linked to a different account",
+        )
+
+    assert db.pool is not None, "database pool not started"
+    async with db.pool.acquire() as conn:
+        # One transaction, and the order matters: the partial unique index
+        # allows a Clerk user exactly one workspace, so any earlier link — the
+        # empty workspace auto-provisioned on first sign-in — has to be
+        # released before this one can be claimed.
+        async with conn.transaction():
+            await conn.execute(
+                """
+                UPDATE workspaces SET clerk_user_id = NULL
+                WHERE clerk_user_id = $1 AND id <> $2
+                """,
+                body.clerk_user_id,
+                row["id"],
+            )
+            await conn.execute(
+                "UPDATE workspaces SET clerk_user_id = $1 WHERE id = $2",
+                body.clerk_user_id,
+                row["id"],
+            )
+
+    return {
+        "workspace_id": str(row["id"]),
+        "name": row["name"],
+        "key_prefix": row["key_prefix"],
+        "linked": True,
+    }
