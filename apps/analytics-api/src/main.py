@@ -11,7 +11,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .db import db
-from .routes import benchmark, forecast, summary, usage
+from .routes import benchmark, forecast, summary, usage, workspaces
 
 log = logging.getLogger(__name__)
 
@@ -50,6 +50,9 @@ app.include_router(summary.router)
 app.include_router(usage.router)
 app.include_router(benchmark.router)
 app.include_router(forecast.router)
+# Server-to-server only: gated by INTERNAL_API_TOKEN, not a txk- key, and
+# deliberately outside the CORS allowlist below (no browser calls it).
+app.include_router(workspaces.router)
 
 
 @app.get("/health")
