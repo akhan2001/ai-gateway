@@ -16,8 +16,10 @@ prefix; the plaintext is shown once by whoever minted it and is then gone.
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 import os
+import secrets
 from uuid import UUID
 
 from fastapi import APIRouter, Header, HTTPException
@@ -60,7 +62,10 @@ async def get_workspace_for_clerk_user(
                  WHERE k.workspace_id = w.id AND NOT k.revoked
                  ORDER BY k.created_at DESC
                  LIMIT 1
-               ) AS key_prefix
+               ) AS key_prefix,
+               EXISTS (
+                 SELECT 1 FROM provider_keys pk WHERE pk.workspace_id = w.id
+               ) AS has_provider_keys
         FROM workspaces w
         WHERE w.clerk_user_id = $1 AND w.enabled
         """,
@@ -74,6 +79,7 @@ async def get_workspace_for_clerk_user(
         "name": row["name"],
         "email": row["email"],
         "key_prefix": row["key_prefix"],
+        "has_provider_keys": row["has_provider_keys"],
         "created_at": row["created_at"].isoformat(),
     }
 
@@ -115,3 +121,95 @@ async def link_workspace_to_clerk_user(
             detail="That workspace does not exist or already belongs to someone else",
         )
     return {"workspace_id": str(updated["id"]), "created_link": True}
+
+
+class CreateRequest(BaseModel):
+    clerk_user_id: str
+    email: str | None = None
+    name: str | None = None
+
+
+def _generate_key() -> str:
+    """A `txk-` key: 32 bytes of CSPRNG output, URL-safe."""
+    return "txk-" + secrets.token_urlsafe(32)
+
+
+def _hash_key(raw: str) -> str:
+    """SHA-256, matching the gateway exactly.
+
+    NOT bcrypt, and this is not a preference. The gateway authenticates every
+    proxied request with `WHERE key_hash = $1` — a single indexed lookup.
+    Bcrypt puts the salt inside each hash, so verifying one means trying every
+    stored hash in turn: a full table scan on the hot path of an inference
+    proxy. It is safe to use a fast hash here precisely because the key is 32
+    bytes of CSPRNG output rather than a chosen password — there is no
+    dictionary to attack.
+
+    The practical consequence matters more than the theory: a key hashed any
+    other way would not authenticate at the gateway at all, so the customer
+    would be handed a credential that works nowhere.
+    """
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+@router.post("/workspaces", status_code=201)
+async def create_workspace_for_clerk_user(
+    body: CreateRequest,
+    x_internal_token: str | None = Header(default=None),
+) -> dict:
+    """Create a workspace and its first key for a Clerk user, in one call.
+
+    Lets the dashboard provision without holding the gateway's admin token,
+    which is a meaningfully smaller blast radius for a secret living in Vercel.
+
+    Returns the plaintext key exactly once. Only a SHA-256 hash and a 12-char
+    display prefix are stored, so this response is the single opportunity to
+    show it to its owner.
+    """
+    _authorize(x_internal_token)
+
+    existing = await db.fetchrow(
+        "SELECT id FROM workspaces WHERE clerk_user_id = $1",
+        body.clerk_user_id,
+    )
+    if existing is not None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "That user already has a workspace",
+                "workspace_id": str(existing["id"]),
+            },
+        )
+
+    raw_key = _generate_key()
+    name = body.name or (body.email.split("@")[0] if body.email else "workspace")
+
+    assert db.pool is not None, "database pool not started"
+    async with db.pool.acquire() as conn:
+        # One transaction: a workspace without a key would strand the user with
+        # nothing to authenticate with and no way to ask for another.
+        async with conn.transaction():
+            workspace_id = await conn.fetchval(
+                """
+                INSERT INTO workspaces (name, clerk_user_id, email)
+                VALUES ($1, $2, $3)
+                RETURNING id
+                """,
+                name,
+                body.clerk_user_id,
+                body.email,
+            )
+            await conn.execute(
+                "INSERT INTO api_keys (workspace_id, key_hash, key_prefix) VALUES ($1, $2, $3)",
+                workspace_id,
+                _hash_key(raw_key),
+                raw_key[:12],
+            )
+
+    return {
+        "workspace_id": str(workspace_id),
+        "name": name,
+        "api_key": raw_key,
+        "created": True,
+        "warning": "Store this key now. It cannot be retrieved again.",
+    }
