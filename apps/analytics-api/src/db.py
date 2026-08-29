@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any
+from contextlib import asynccontextmanager
+from typing import Any, AsyncIterator
 
 import asyncpg
 
@@ -41,6 +42,22 @@ class Database:
         assert self.pool is not None, "database pool not started"
         row = await self.pool.fetchrow(query, *args)
         return dict(row) if row else None
+
+    async def iterate(
+        self, query: str, *args: Any, prefetch: int = 1_000
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Stream rows through a server-side cursor.
+
+        The dashboard endpoints all aggregate, so their result sets are bounded
+        by the number of models or days. A raw CSV export is bounded only by
+        how much traffic the workspace pushed, so it reads through a cursor and
+        keeps memory flat instead of materialising the whole month.
+        """
+        assert self.pool is not None, "database pool not started"
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                async for row in conn.cursor(query, *args, prefetch=prefetch):
+                    yield dict(row)
 
 
 db = Database()
