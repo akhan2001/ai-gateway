@@ -10,8 +10,10 @@ from typing import AsyncIterator
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from .budget_checker import budget_checker
 from .db import db
-from .routes import benchmark, export, forecast, summary, usage, workspaces
+from .migrations import run_startup_migrations
+from .routes import benchmark, budget, export, forecast, summary, usage, workspaces
 
 log = logging.getLogger(__name__)
 
@@ -23,10 +25,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         format="%(asctime)s %(levelname)-8s %(name)s %(message)s",
     )
     await db.start()
+    await run_startup_migrations()
+    budget_checker.start()
     log.info("analytics api ready")
     try:
         yield
     finally:
+        await budget_checker.stop()
         await db.stop()
 
 
@@ -50,6 +55,7 @@ app.include_router(summary.router)
 app.include_router(usage.router)
 app.include_router(benchmark.router)
 app.include_router(forecast.router)
+app.include_router(budget.router)
 app.include_router(export.router)
 # Server-to-server only: gated by INTERNAL_API_TOKEN, not a txk- key, and
 # deliberately outside the CORS allowlist below (no browser calls it).
