@@ -39,6 +39,16 @@ class Settings:
     )
     redis_url: str | None = field(default_factory=lambda: os.getenv("REDIS_URL") or None)
 
+    # Upstash Redis REST API, used for rate limiting only (see
+    # services/ratelimit.py). Separate from REDIS_URL/redis.asyncio above,
+    # which backs the auth-key cache.
+    upstash_redis_rest_url: str | None = field(
+        default_factory=lambda: os.getenv("UPSTASH_REDIS_REST_URL") or None
+    )
+    upstash_redis_rest_token: str | None = field(
+        default_factory=lambda: os.getenv("UPSTASH_REDIS_REST_TOKEN") or None
+    )
+
     # Fernet key for provider-credential encryption. There is deliberately no
     # default: booting with a hardcoded key would silently make every stored
     # provider credential readable by anyone with the source.
@@ -81,6 +91,17 @@ class Settings:
     )
 
     log_level: str = field(default_factory=lambda: _env("LOG_LEVEL", "INFO"))
+
+    # Rate limits, requests/minute. See services/ratelimit.py.
+    rate_limit_workspace_per_minute: int = field(
+        default_factory=lambda: _env_int("RATE_LIMIT_WORKSPACE_PER_MINUTE", 60)
+    )
+    rate_limit_public_ip_per_minute: int = field(
+        default_factory=lambda: _env_int("RATE_LIMIT_PUBLIC_IP_PER_MINUTE", 10)
+    )
+    rate_limit_admin_ip_per_minute: int = field(
+        default_factory=lambda: _env_int("RATE_LIMIT_ADMIN_IP_PER_MINUTE", 5)
+    )
 
     @property
     def asyncpg_dsn(self) -> str:

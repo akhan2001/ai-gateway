@@ -18,11 +18,13 @@ import httpx
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from ..config import settings
 from ..models.log import UsageRecord
 from ..providers.base import ProviderAdapter, StreamState
 from ..providers.registry import get_adapter, known_providers
 from ..services.acpi import utcnow
 from ..services.cost import price_request
+from ..services.ratelimit import rate_limited_response
 from ..services.usage import Usage, usage_from_obj
 
 log = logging.getLogger(__name__)
@@ -71,6 +73,13 @@ async def proxy(provider: str, path: str, request: Request) -> Response:
             "Invalid or missing Tokenix API key. Pass it as 'Authorization: Bearer txk-...'.",
             "authentication_error",
         )
+
+    if app.state.ratelimit is not None:
+        limit_result = await app.state.ratelimit.check(
+            "workspace", str(principal.workspace_id), settings.rate_limit_workspace_per_minute
+        )
+        if not limit_result.allowed:
+            return rate_limited_response(limit_result.retry_after_seconds)
 
     try:
         payload = json.loads(await request.body() or b"{}")

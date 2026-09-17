@@ -15,6 +15,7 @@ from .routers import admin, health, proxy
 from .services.acpi import AcpiCatalog
 from .services.db import Database
 from .services.encrypt import EncryptionNotConfigured, decrypt, encrypt
+from .services.ratelimit import RateLimiter
 
 log = logging.getLogger(__name__)
 
@@ -65,6 +66,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.redis = await _connect_redis()
     app.state.auth = Authenticator(app.state.db, app.state.redis)
 
+    if settings.upstash_redis_rest_url and settings.upstash_redis_rest_token:
+        app.state.ratelimit = RateLimiter(
+            settings.upstash_redis_rest_url, settings.upstash_redis_rest_token
+        )
+    else:
+        log.warning(
+            "UPSTASH_REDIS_REST_URL/UPSTASH_REDIS_REST_TOKEN not set; rate limiting disabled"
+        )
+        app.state.ratelimit = None
+
     app.state.http = httpx.AsyncClient(
         timeout=httpx.Timeout(
             settings.provider_timeout_seconds,
@@ -82,6 +93,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await app.state.http.aclose()
         if app.state.redis is not None:
             await app.state.redis.aclose()
+        if app.state.ratelimit is not None:
+            await app.state.ratelimit.aclose()
         await app.state.db.stop()
         await app.state.acpi.stop()
         log.info("tokenix gateway stopped")

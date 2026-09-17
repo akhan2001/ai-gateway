@@ -15,8 +15,10 @@ from fastapi import APIRouter, Header, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from ..config import settings
 from ..middleware.auth import generate_key, hash_key, key_display_prefix
 from ..providers.registry import known_providers
+from ..services.ratelimit import client_ip, rate_limited_response
 
 router = APIRouter(prefix="/admin")
 
@@ -27,6 +29,19 @@ def _authorized(token: str | None) -> bool:
         return False
     # Constant-time compare so the token cannot be recovered by timing.
     return bool(token) and secrets.compare_digest(token, expected)
+
+
+async def _rate_limited(request: Request) -> JSONResponse | None:
+    """Checked before `_authorized` too: this endpoint sits in front of a
+    database write, and a brute-forcer doesn't need a valid token to be
+    worth throttling."""
+    limiter = request.app.state.ratelimit
+    if limiter is None:
+        return None
+    result = await limiter.check(
+        "admin", client_ip(request), settings.rate_limit_admin_ip_per_minute
+    )
+    return None if result.allowed else rate_limited_response(result.retry_after_seconds)
 
 
 class CreateWorkspace(BaseModel):
@@ -44,6 +59,8 @@ async def create_workspace(
     request: Request,
     x_admin_token: str | None = Header(default=None),
 ) -> JSONResponse:
+    if (limited := await _rate_limited(request)) is not None:
+        return limited
     if not _authorized(x_admin_token):
         return JSONResponse(status_code=401, content={"error": "unauthorized"})
 
@@ -83,6 +100,8 @@ async def add_provider_key(
     request: Request,
     x_admin_token: str | None = Header(default=None),
 ) -> JSONResponse:
+    if (limited := await _rate_limited(request)) is not None:
+        return limited
     if not _authorized(x_admin_token):
         return JSONResponse(status_code=401, content={"error": "unauthorized"})
 

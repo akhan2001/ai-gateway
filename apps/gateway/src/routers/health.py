@@ -5,6 +5,9 @@ from __future__ import annotations
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
+from ..config import settings
+from ..services.ratelimit import client_ip, rate_limited_response
+
 router = APIRouter()
 
 
@@ -12,6 +15,14 @@ router = APIRouter()
 async def health(request: Request) -> JSONResponse:
     """Readiness: reports degraded if a dependency is down, but never 500s."""
     app = request.app
+
+    if app.state.ratelimit is not None:
+        limit_result = await app.state.ratelimit.check(
+            "public", client_ip(request), settings.rate_limit_public_ip_per_minute
+        )
+        if not limit_result.allowed:
+            return rate_limited_response(limit_result.retry_after_seconds)
+
     acpi = app.state.acpi
 
     db_ok = False
@@ -40,8 +51,16 @@ async def health(request: Request) -> JSONResponse:
     )
 
 
-@router.get("/")
-async def root() -> dict[str, str]:
+@router.get("/", response_model=None)
+async def root(request: Request) -> dict[str, str] | JSONResponse:
+    app = request.app
+    if app.state.ratelimit is not None:
+        limit_result = await app.state.ratelimit.check(
+            "public", client_ip(request), settings.rate_limit_public_ip_per_minute
+        )
+        if not limit_result.allowed:
+            return rate_limited_response(limit_result.retry_after_seconds)
+
     return {
         "service": "tokenix-gateway",
         "docs": "https://tokenixindex.com/docs",

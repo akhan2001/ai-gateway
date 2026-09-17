@@ -82,6 +82,7 @@ def app(tmp_path):
     application.state.acpi = catalog
     application.state.db = FakeDatabase()
     application.state.auth = FakeAuth(API_KEY)
+    application.state.ratelimit = None
     application.state.http = httpx.AsyncClient(transport=_upstream_transport())
     # The fake db hands back "encrypted::<key>"; strip the marker.
     application.state.decrypt = lambda value: value.split("::", 1)[1]
