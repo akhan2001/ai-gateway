@@ -11,8 +11,10 @@ from __future__ import annotations
 
 import logging
 import os
+from typing import TYPE_CHECKING
 
-from supabase import AsyncClient, create_async_client
+if TYPE_CHECKING:
+    from supabase import AsyncClient
 
 log = logging.getLogger(__name__)
 
@@ -40,15 +42,25 @@ class SupabaseConn:
 
     async def start(self) -> None:
         """Best-effort — the rest of the API (budgets, summary, usage) must stay
-        up even if Supabase isn't configured yet. session_sync_worker checks
-        `client is not None` before every cycle and no-ops otherwise."""
+        up even if Supabase isn't configured, or the `supabase` package itself
+        is broken, in production. session_sync_worker checks `client is not
+        None` before every cycle and no-ops otherwise.
+
+        The import is deferred to inside this try/except, not at module level:
+        `supabase` pulls in a chain of sub-packages (supabase_auth, postgrest,
+        realtime, storage3) whose versions all have to line up, and an import
+        failure there must not crash app startup the way a bad connection
+        doesn't."""
         try:
+            from supabase import create_async_client
+
             self.client = await create_async_client(_url(), _key())
             log.info("supabase client up")
         except Exception:
             log.warning(
-                "supabase client not started (SUPABASE_URL/SUPABASE_SERVICE_KEY "
-                "missing or unreachable) — session sync will be a no-op",
+                "supabase client not started (missing config, unreachable, or "
+                "the supabase package failed to import) — session sync will be "
+                "a no-op",
                 exc_info=True,
             )
 
