@@ -16,6 +16,11 @@ LEDGER_COLUMNS = (
     "model_id",
     "feature_tag",
     "workload_tag",
+    "session_id",
+    "step_name",
+    "session_name",
+    "session_status",
+    "auto_generated",
     "input_tokens",
     "output_tokens",
     "cached_input_tokens",
@@ -41,6 +46,11 @@ class UsageRecord:
     model_id: str
     feature_tag: str | None
     workload_tag: str | None
+    session_id: str | None
+    step_name: str | None
+    session_name: str | None
+    session_status: str | None
+    auto_generated: bool
 
     input_tokens: int
     output_tokens: int

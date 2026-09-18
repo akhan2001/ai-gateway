@@ -18,7 +18,11 @@ class OpenAIAdapter(ProviderAdapter):
     base_url = "https://api.openai.com"
 
     def build_request(
-        self, path: str, payload: dict[str, Any], api_key: str
+        self,
+        path: str,
+        payload: dict[str, Any],
+        api_key: str,
+        config: dict[str, Any] | None = None,
     ) -> TranslatedRequest:
         body = dict(payload)
         body["model"] = self.resolve_model(payload)

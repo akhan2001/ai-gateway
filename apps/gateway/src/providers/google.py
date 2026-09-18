@@ -66,7 +66,11 @@ class GoogleAdapter(ProviderAdapter):
     base_url = "https://generativelanguage.googleapis.com"
 
     def build_request(
-        self, path: str, payload: dict[str, Any], api_key: str
+        self,
+        path: str,
+        payload: dict[str, Any],
+        api_key: str,
+        config: dict[str, Any] | None = None,
     ) -> TranslatedRequest:
         model = self.resolve_model(payload)
         system_instruction, contents = _to_contents(payload.get("messages") or [])

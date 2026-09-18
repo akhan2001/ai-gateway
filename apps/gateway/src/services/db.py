@@ -9,6 +9,7 @@ request.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from dataclasses import dataclass, field
 from typing import Any
@@ -159,15 +160,22 @@ class Database:
         )
         return dict(row) if row else None
 
-    async def provider_key(self, workspace_id: UUID, provider: str) -> str | None:
-        """Encrypted provider credential for a workspace."""
+    async def provider_credential(
+        self, workspace_id: UUID, provider: str
+    ) -> tuple[str, dict[str, Any] | None] | None:
+        """Encrypted key plus provider-specific config (e.g. Azure's resource
+        name and deployment map), or None if nothing is stored."""
         if self.pool is None:
             return None
-        return await self.pool.fetchval(
-            "SELECT encrypted_key FROM provider_keys WHERE workspace_id = $1 AND provider = $2",
+        row = await self.pool.fetchrow(
+            "SELECT encrypted_key, config FROM provider_keys WHERE workspace_id = $1 AND provider = $2",
             workspace_id,
             provider,
         )
+        if row is None:
+            return None
+        config = row["config"]
+        return row["encrypted_key"], (json.loads(config) if isinstance(config, str) else config)
 
     async def touch_key(self, key_id: UUID) -> None:
         """Record last use. Fire-and-forget; failure must not affect the request."""

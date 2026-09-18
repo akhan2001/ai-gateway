@@ -62,7 +62,11 @@ class AnthropicAdapter(ProviderAdapter):
     api_version = "2023-06-01"
 
     def build_request(
-        self, path: str, payload: dict[str, Any], api_key: str
+        self,
+        path: str,
+        payload: dict[str, Any],
+        api_key: str,
+        config: dict[str, Any] | None = None,
     ) -> TranslatedRequest:
         system, messages = _split_system(payload.get("messages") or [])
 

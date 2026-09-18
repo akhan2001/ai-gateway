@@ -7,8 +7,10 @@ the dashboard calling it server-side.
 
 from __future__ import annotations
 
+import json
 import os
 import secrets
+from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Header, Request
@@ -51,6 +53,11 @@ class CreateWorkspace(BaseModel):
 class AddProviderKey(BaseModel):
     provider: str
     api_key: str = Field(min_length=1)
+    # Provider-specific connection metadata beyond the secret itself. Azure
+    # requires at least {"resource_name": "..."}; optionally
+    # {"api_version": "...", "deployments": {"<model>": "<deployment>"}}.
+    # Ignored by providers that only need an API key.
+    config: dict[str, Any] | None = None
 
 
 @router.post("/workspaces")
@@ -112,16 +119,27 @@ async def add_provider_key(
             content={"error": f"unknown provider '{provider}'", "supported": known_providers()},
         )
 
+    if provider == "azure" and not (body.config or {}).get("resource_name"):
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": "azure requires config.resource_name (e.g. 'my-company-openai', "
+                "the name in https://<resource>.openai.azure.com)"
+            },
+        )
+
     encrypted = request.app.state.encrypt(body.api_key)
+    config_json = json.dumps(body.config) if body.config is not None else None
     await request.app.state.db.pool.execute(
         """
-        INSERT INTO provider_keys (workspace_id, provider, encrypted_key)
-        VALUES ($1, $2, $3)
+        INSERT INTO provider_keys (workspace_id, provider, encrypted_key, config)
+        VALUES ($1, $2, $3, $4)
         ON CONFLICT (workspace_id, provider)
-        DO UPDATE SET encrypted_key = EXCLUDED.encrypted_key
+        DO UPDATE SET encrypted_key = EXCLUDED.encrypted_key, config = EXCLUDED.config
         """,
         workspace_id,
         provider,
         encrypted,
+        config_json,
     )
     return JSONResponse(status_code=201, content={"workspace_id": str(workspace_id), "provider": provider})

@@ -12,6 +12,7 @@ import json
 import logging
 import time
 import uuid
+from dataclasses import dataclass
 from typing import Any, AsyncIterator
 
 import httpx
@@ -20,6 +21,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from ..config import settings
 from ..models.log import UsageRecord
+from ..providers.azure import AzureConfigError
 from ..providers.base import ProviderAdapter, StreamState
 from ..providers.registry import get_adapter, known_providers
 from ..services.acpi import utcnow
@@ -41,6 +43,7 @@ _STRIPPED_REQUEST_HEADERS = {
     "upgrade",
     "authorization",
     "x-api-key",
+    "api-key",
     "accept-encoding",
 }
 
@@ -49,6 +52,49 @@ def _error(status: int, message: str, kind: str) -> JSONResponse:
     """OpenAI-shaped error, so customer SDKs surface it normally."""
     return JSONResponse(
         status_code=status, content={"error": {"message": message, "type": kind}}
+    )
+
+
+# Tokenix-Session-Status values that end a session immediately rather than
+# leaving it for the session worker's inactivity timeout to catch.
+_TERMINAL_SESSION_STATUSES = {"completed", "failed"}
+
+
+# Width of the auto-grouping window used when a request carries no
+# Tokenix-Session header: every unheadered request from the same workspace
+# within the same 5-minute slice lands in one auto-generated session, so
+# basic session tracking costs a customer zero extra code.
+_AUTO_SESSION_WINDOW_SECONDS = 300
+
+
+@dataclass(frozen=True)
+class SessionSignals:
+    session_id: str | None
+    step_name: str | None
+    session_name: str | None
+    session_status: str | None  # only ever "completed" or "failed"; else None
+    auto_generated: bool
+
+
+def _session_signals(request: Request, workspace_id: uuid.UUID) -> SessionSignals:
+    raw_status = request.headers.get("tokenix-session-status")
+    status = raw_status.strip().lower() if raw_status else None
+
+    session_id = request.headers.get("tokenix-session")
+    session_name = request.headers.get("tokenix-session-name")
+    auto_generated = False
+    if not session_id:
+        window = int(time.time() // _AUTO_SESSION_WINDOW_SECONDS)
+        session_id = f"auto-{workspace_id}-{window}"
+        session_name = "Auto session"
+        auto_generated = True
+
+    return SessionSignals(
+        session_id=session_id,
+        step_name=request.headers.get("tokenix-step"),
+        session_name=session_name,
+        session_status=status if status in _TERMINAL_SESSION_STATUSES else None,
+        auto_generated=auto_generated,
     )
 
 
@@ -74,6 +120,8 @@ async def proxy(provider: str, path: str, request: Request) -> Response:
             "authentication_error",
         )
 
+    session = _session_signals(request, principal.workspace_id)
+
     if app.state.ratelimit is not None:
         limit_result = await app.state.ratelimit.check(
             "workspace", str(principal.workspace_id), settings.rate_limit_workspace_per_minute
@@ -88,16 +136,20 @@ async def proxy(provider: str, path: str, request: Request) -> Response:
     if not isinstance(payload, dict):
         return _error(400, "Request body must be a JSON object.", "invalid_request_error")
 
-    upstream_key = await _provider_credential(app, principal.workspace_id, adapter.name)
-    if upstream_key is None:
+    credential = await _provider_credential(app, principal.workspace_id, adapter.name)
+    if credential is None:
         return _error(
             400,
             f"No {adapter.name} credential stored for this workspace. "
             f"Add one on the Connect page before sending {adapter.name} traffic.",
             "invalid_request_error",
         )
+    upstream_key, provider_config = credential
 
-    translated = adapter.build_request(path, payload, upstream_key)
+    try:
+        translated = adapter.build_request(path, payload, upstream_key, provider_config)
+    except AzureConfigError as exc:
+        return _error(400, str(exc), "invalid_request_error")
     translated.headers.update(_passthrough_headers(request))
 
     model_id = adapter.resolve_model(payload)
@@ -111,10 +163,10 @@ async def proxy(provider: str, path: str, request: Request) -> Response:
 
     if is_stream:
         return await _proxy_stream(
-            app, client, adapter, translated, request_id, principal, model_id, tags, started
+            app, client, adapter, translated, request_id, principal, model_id, tags, session, started
         )
     return await _proxy_buffered(
-        app, client, adapter, translated, request_id, principal, model_id, tags, started
+        app, client, adapter, translated, request_id, principal, model_id, tags, session, started
     )
 
 
@@ -132,6 +184,7 @@ async def _proxy_buffered(
     principal: Any,
     model_id: str,
     tags: tuple[str | None, str | None],
+    session: SessionSignals,
     started: float,
 ) -> Response:
     try:
@@ -139,11 +192,11 @@ async def _proxy_buffered(
             translated.url, json=translated.payload, headers=translated.headers
         )
     except httpx.TimeoutException:
-        _record(app, request_id, principal, adapter, model_id, Usage(), tags, 504, False, started)
+        _record(app, request_id, principal, adapter, model_id, Usage(), tags, session, 504, False, started)
         return _error(504, "Upstream provider timed out.", "api_error")
     except httpx.HTTPError as exc:
         log.warning("upstream request failed: %s", exc)
-        _record(app, request_id, principal, adapter, model_id, Usage(), tags, 502, False, started)
+        _record(app, request_id, principal, adapter, model_id, Usage(), tags, session, 502, False, started)
         return _error(502, "Could not reach the upstream provider.", "api_error")
 
     latency_ms = int((time.monotonic() - started) * 1000)
@@ -154,7 +207,7 @@ async def _proxy_buffered(
         # Non-JSON upstream error page — forward it verbatim rather than
         # inventing a shape for it.
         _record(
-            app, request_id, principal, adapter, model_id, Usage(), tags,
+            app, request_id, principal, adapter, model_id, Usage(), tags, session,
             upstream.status_code, False, started,
         )
         return Response(
@@ -165,7 +218,7 @@ async def _proxy_buffered(
 
     if upstream.status_code >= 400:
         _record(
-            app, request_id, principal, adapter, model_id, Usage(), tags,
+            app, request_id, principal, adapter, model_id, Usage(), tags, session,
             upstream.status_code, False, started,
         )
         return JSONResponse(status_code=upstream.status_code, content=raw)
@@ -175,7 +228,7 @@ async def _proxy_buffered(
     served_model = raw.get("model") or raw.get("modelVersion") or model_id
 
     _record(
-        app, request_id, principal, adapter, served_model, usage, tags,
+        app, request_id, principal, adapter, served_model, usage, tags, session,
         upstream.status_code, False, started, latency_ms=latency_ms,
     )
     return JSONResponse(status_code=upstream.status_code, content=body)
@@ -195,6 +248,7 @@ async def _proxy_stream(
     principal: Any,
     model_id: str,
     tags: tuple[str | None, str | None],
+    session: SessionSignals,
     started: float,
 ) -> Response:
     state = StreamState(model=model_id)
@@ -238,7 +292,7 @@ async def _proxy_stream(
             # cancelled stream still bills for the tokens already produced.
             _record(
                 app, request_id, principal, adapter, state.model or model_id,
-                state.usage, tags, status, True, started,
+                state.usage, tags, session, status, True, started,
             )
 
     return StreamingResponse(
@@ -304,12 +358,15 @@ def _passthrough_headers(request: Request) -> dict[str, str]:
     }
 
 
-async def _provider_credential(app: Any, workspace_id: uuid.UUID, provider: str) -> str | None:
-    encrypted = await app.state.db.provider_key(workspace_id, provider)
-    if not encrypted:
+async def _provider_credential(
+    app: Any, workspace_id: uuid.UUID, provider: str
+) -> tuple[str, dict[str, Any] | None] | None:
+    stored = await app.state.db.provider_credential(workspace_id, provider)
+    if stored is None:
         return None
+    encrypted, config = stored
     try:
-        return app.state.decrypt(encrypted)
+        return app.state.decrypt(encrypted), config
     except ValueError:
         log.error("provider credential for workspace %s could not be decrypted", workspace_id)
         return None
@@ -323,6 +380,7 @@ def _record(
     model_id: str,
     usage: Usage,
     tags: tuple[str | None, str | None],
+    session: SessionSignals,
     status_code: int,
     is_stream: bool,
     started: float,
@@ -343,6 +401,11 @@ def _record(
                 model_id=model_id,
                 feature_tag=feature_tag,
                 workload_tag=workload_tag,
+                session_id=session.session_id,
+                step_name=session.step_name,
+                session_name=session.session_name,
+                session_status=session.session_status,
+                auto_generated=session.auto_generated,
                 input_tokens=usage.input_tokens,
                 output_tokens=usage.output_tokens,
                 cached_input_tokens=usage.cached_input_tokens,

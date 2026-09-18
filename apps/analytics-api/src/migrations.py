@@ -1,11 +1,16 @@
-"""Startup migration runner for sql/003_budgets.sql.
+"""Startup migration runner for sql/003_budgets.sql, sql/005_agent_sessions.sql,
+sql/006_session_signals.sql, and sql/007_auto_session.sql.
 
 The analytics-api Docker image only bundles `src/` (build context is
 `apps/analytics-api` — see its Dockerfile — which does not include the
 repo-root `sql/` directory), so the statements are embedded here rather than
-read from disk at runtime. `sql/003_budgets.sql` stays the reviewable source
-of truth (and is what local dev applies via docker-compose's initdb mount);
-keep the two in sync if this migration ever changes.
+read from disk at runtime. The numbered files under `sql/` stay the reviewable
+source of truth (and are what local dev applies via docker-compose's initdb
+mount); keep them in sync if a migration here ever changes.
+
+sql/supabase/001_agent_sessions.sql is NOT embedded here — it targets a
+separate Supabase connection, not the TimescaleDB pool this runner uses. Apply
+it by hand until a Supabase client is wired into this service.
 
 Every statement is `IF NOT EXISTS`, so running this on every startup — every
 deploy, every replica — is safe and idempotent.
@@ -41,6 +46,29 @@ _STATEMENTS = [
         UNIQUE (workspace_id, alert_type, month)
     )
     """,
+    """
+    ALTER TABLE usage_records ADD COLUMN IF NOT EXISTS session_id TEXT
+    """,
+    """
+    ALTER TABLE usage_records ADD COLUMN IF NOT EXISTS step_name TEXT
+    """,
+    """
+    ALTER TABLE usage_records ADD COLUMN IF NOT EXISTS step_sequence INTEGER
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS usage_records_session_idx
+        ON usage_records (session_id, "timestamp" DESC)
+        WHERE session_id IS NOT NULL
+    """,
+    """
+    ALTER TABLE usage_records ADD COLUMN IF NOT EXISTS session_name TEXT
+    """,
+    """
+    ALTER TABLE usage_records ADD COLUMN IF NOT EXISTS session_status TEXT
+    """,
+    """
+    ALTER TABLE usage_records ADD COLUMN IF NOT EXISTS auto_generated BOOLEAN NOT NULL DEFAULT FALSE
+    """,
 ]
 
 
@@ -53,6 +81,9 @@ async def run_startup_migrations() -> None:
             async with conn.transaction():
                 for statement in _STATEMENTS:
                     await conn.execute(statement)
-        log.info("startup migration 003_budgets applied (or already present)")
+        log.info(
+            "startup migrations 003_budgets, 005_agent_sessions, 006_session_signals, "
+            "007_auto_session applied (or already present)"
+        )
     except Exception:
-        log.exception("startup migration 003_budgets failed")
+        log.exception("startup migrations failed")

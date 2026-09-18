@@ -51,8 +51,8 @@ class FakeDatabase:
         self.rows.append(record)
         return True
 
-    async def provider_key(self, workspace_id, provider):  # noqa: ANN001
-        return "encrypted::sk-upstream"
+    async def provider_credential(self, workspace_id, provider):  # noqa: ANN001
+        return "encrypted::sk-upstream", None
 
 
 class FakeAuth:
@@ -167,6 +167,16 @@ def test_unknown_provider_is_404(app):
     with TestClient(app) as client:
         response = _post(client, "/cohere/v1/chat/completions", {"model": "x"})
     assert response.status_code == 404
+
+
+def test_azure_without_resource_config_is_400_not_500(app):
+    """FakeDatabase always hands back config=None; a real workspace that
+    saved an Azure key with no resource_name would hit the same path."""
+    with TestClient(app) as client:
+        response = _post(client, "/azure/v1/chat/completions", {"model": "gpt-4o-mini"})
+    assert response.status_code == 400
+    assert "resource" in response.json()["error"]["message"].lower()
+    assert app.state.db.rows == []
 
 
 # --- the MVP acceptance test -------------------------------------------------

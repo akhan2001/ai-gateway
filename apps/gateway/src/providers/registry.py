@@ -7,13 +7,14 @@ per request lives in `StreamState`.
 from __future__ import annotations
 
 from .anthropic import AnthropicAdapter
+from .azure import AzureAdapter
 from .base import ProviderAdapter
 from .google import GoogleAdapter
 from .openai import OpenAIAdapter
 
 _ADAPTERS: dict[str, ProviderAdapter] = {
     adapter.name: adapter
-    for adapter in (OpenAIAdapter(), AnthropicAdapter(), GoogleAdapter())
+    for adapter in (OpenAIAdapter(), AnthropicAdapter(), GoogleAdapter(), AzureAdapter())
 }
 
 

@@ -1,0 +1,13 @@
+-- Room for provider-specific connection metadata beyond a single secret.
+--
+-- Every provider so far (OpenAI, Anthropic, Google) authenticates with one
+-- bearer-style API key, so `encrypted_key` alone was enough. Azure OpenAI
+-- breaks that: a customer's traffic is scoped to their own resource
+-- (`https://<resource>.openai.azure.com`) and routed by *deployment name*,
+-- not by the model id in the request body — two customers can both call
+-- "gpt-4o" and land on differently-named deployments. Bedrock will need the
+-- same kind of room later (region + role ARN, not just a key).
+--
+-- `config` stays nullable and unused by the existing three providers; only
+-- the adapters that need it read it.
+ALTER TABLE provider_keys ADD COLUMN IF NOT EXISTS config JSONB;

@@ -59,12 +59,19 @@ class ProviderAdapter(ABC):
 
     @abstractmethod
     def build_request(
-        self, path: str, payload: dict[str, Any], api_key: str
+        self,
+        path: str,
+        payload: dict[str, Any],
+        api_key: str,
+        config: dict[str, Any] | None = None,
     ) -> TranslatedRequest:
         """Translate an OpenAI-shaped request into this provider's format.
 
         `path` is everything after the provider prefix, e.g.
-        `v1/chat/completions`.
+        `v1/chat/completions`. `config` is the workspace's per-provider
+        connection metadata beyond the secret itself (e.g. Azure's resource
+        name and deployment mapping) — unused by providers that only need an
+        API key.
         """
 
     # -- response -----------------------------------------------------------

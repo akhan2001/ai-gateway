@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import pytest
+
+from src.providers.azure import AzureConfigError
 from src.providers.base import StreamState
 from src.providers.registry import get_adapter, known_providers
 
@@ -15,8 +18,8 @@ OPENAI_REQUEST = {
 }
 
 
-def test_registry_has_all_three():
-    assert known_providers() == ["anthropic", "google", "openai"]
+def test_registry_has_all_providers():
+    assert known_providers() == ["anthropic", "azure", "google", "openai"]
     assert get_adapter("OpenAI") is not None  # case-insensitive
     assert get_adapter("nope") is None
 
@@ -168,3 +171,69 @@ def test_google_response_becomes_openai_shape():
     assert openai_shaped["choices"][0]["message"]["content"] == "hello back"
     assert openai_shaped["choices"][0]["finish_reason"] == "stop"
     assert openai_shaped["usage"]["completion_tokens"] == 2
+
+
+# --- Azure -------------------------------------------------------------------
+
+
+def test_azure_requires_resource_name_config():
+    adapter = get_adapter("azure")
+    with pytest.raises(AzureConfigError):
+        adapter.build_request("v1/chat/completions", OPENAI_REQUEST, "az-key", None)
+
+
+def test_azure_builds_deployment_scoped_url_with_default_api_version():
+    adapter = get_adapter("azure")
+    built = adapter.build_request(
+        "v1/chat/completions",
+        {**OPENAI_REQUEST, "model": "gpt-4o-mini"},
+        "az-key",
+        {"resource_name": "acme-openai"},
+    )
+    assert built.url == (
+        "https://acme-openai.openai.azure.com/openai/deployments/"
+        "gpt-4o-mini/chat/completions?api-version=2024-10-21"
+    )
+    assert built.headers["api-key"] == "az-key"
+    assert "authorization" not in built.headers
+    # The deployment in the URL already pins the model.
+    assert "model" not in built.payload
+
+
+def test_azure_uses_explicit_deployment_mapping_and_api_version():
+    adapter = get_adapter("azure")
+    built = adapter.build_request(
+        "v1/chat/completions",
+        {**OPENAI_REQUEST, "model": "gpt-4o-mini"},
+        "az-key",
+        {
+            "resource_name": "acme-openai",
+            "api_version": "2024-06-01",
+            "deployments": {"gpt-4o-mini": "prod-mini"},
+        },
+    )
+    assert "/deployments/prod-mini/" in built.url
+    assert "api-version=2024-06-01" in built.url
+
+
+def test_azure_forces_usage_on_streams():
+    adapter = get_adapter("azure")
+    built = adapter.build_request(
+        "v1/chat/completions",
+        {**OPENAI_REQUEST, "stream": True},
+        "az-key",
+        {"resource_name": "acme-openai"},
+    )
+    assert built.payload["stream_options"]["include_usage"] is True
+
+
+def test_azure_response_and_stream_chunks_are_passthrough():
+    """Azure speaks the OpenAI wire format directly — no translation needed."""
+    adapter = get_adapter("azure")
+    raw = {"id": "x", "model": "gpt-4o-mini", "choices": []}
+    assert adapter.parse_response(raw) == raw
+
+    state = StreamState()
+    chunk = {"id": "x", "model": "gpt-4o-mini", "choices": [{"delta": {"content": "hi"}}]}
+    assert adapter.parse_stream_chunk(None, chunk, state) == chunk
+    assert state.model == "gpt-4o-mini"
