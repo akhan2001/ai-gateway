@@ -13,6 +13,7 @@ common path costs no database round trip.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -120,6 +121,12 @@ class Authenticator:
             if row
             else None
         )
+
+        if principal is not None:
+            # Bookkeeping only — must never add latency to the auth path a
+            # customer's request is waiting on, so this is dispatched rather
+            # than awaited. db.touch_key() already swallows its own errors.
+            asyncio.create_task(self._db.touch_key(principal.key_id))
 
         await self._cache_put(cache_key, principal)
         return principal
