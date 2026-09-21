@@ -156,15 +156,28 @@ async def _apply_explicit_completions() -> None:
         ).eq("session_id", row["session_id"]).execute()
 
 
+_STAGES = (
+    _create_new_sessions,
+    _update_running_totals,
+    _apply_inactivity_timeout,
+    _apply_abandoned_cleanup,
+    _apply_explicit_completions,
+)
+
+
 async def sync_once() -> None:
     if supabase.client is None:
         log.debug("session sync skipped: supabase client not configured")
         return
-    await _create_new_sessions()
-    await _update_running_totals()
-    await _apply_inactivity_timeout()
-    await _apply_abandoned_cleanup()
-    await _apply_explicit_completions()
+    # Each stage runs in isolation: earlier stages (e.g. totals) can depend on
+    # bad or unexpected row data and raise, but a broken stage must not starve
+    # every stage after it forever — explicit completions in particular must
+    # keep running each cycle even if totals is stuck erroring on some row.
+    for stage in _STAGES:
+        try:
+            await stage()
+        except Exception:
+            log.exception("session sync stage %s failed", stage.__name__)
 
 
 class SessionSyncWorker:

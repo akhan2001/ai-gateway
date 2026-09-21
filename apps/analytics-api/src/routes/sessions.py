@@ -159,7 +159,7 @@ async def session_detail(
         """
         SELECT step_sequence, step_name, model_id, provider,
                input_tokens, output_tokens, cost_usd, acpi_bench_usd,
-               latency_ms, status_code, "timestamp"
+               latency_ms, status_code, "timestamp", priced
         FROM usage_records
         WHERE session_id = $1 AND workspace_id = $2
         ORDER BY "timestamp" ASC
@@ -192,6 +192,7 @@ async def session_detail(
                 "latency_ms": int(step["latency_ms"] or 0),
                 "status_code": step["status_code"],
                 "timestamp": step["timestamp"].isoformat(),
+                "priced": bool(step["priced"]),
             }
         )
 

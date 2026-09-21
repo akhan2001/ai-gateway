@@ -122,9 +122,13 @@ async def models(
                SUM(overpay_usd)         AS overpay_usd,
                -- Score is a per-model constant, so any row's value will do;
                -- MAX just picks one deterministically.
-               MAX(acpi_score)          AS acpi_score
+               MAX(acpi_score)          AS acpi_score,
+               -- A model is either always priced or never (ACPI either has a
+               -- catalog entry for it or doesn't), so BOOL_OR and BOOL_AND
+               -- agree in practice; BOOL_OR reads as "priced at all".
+               BOOL_OR(priced)          AS priced
         FROM usage_records
-        WHERE workspace_id = $1 AND priced
+        WHERE workspace_id = $1
           AND "timestamp" >= NOW() - make_interval(days => $2)
         GROUP BY model_id, provider
         ORDER BY cost_usd DESC
@@ -144,6 +148,7 @@ async def models(
                 "cost_usd": round(f(row["cost_usd"]), 6),
                 "acpi_bench_usd": round(f(row["acpi_bench_usd"]), 6),
                 "overpay_usd": round(f(row["overpay_usd"]), 6),
+                "priced": bool(row["priced"]),
                 "acpi_score": f(row["acpi_score"]) or None,
             }
             for row in rows

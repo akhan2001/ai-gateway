@@ -14,7 +14,7 @@ from .budget_checker import budget_checker
 from .db import db
 from .jobs.session_sync import session_sync_worker
 from .migrations import run_startup_migrations
-from .routes import benchmark, budget, export, forecast, sessions, summary, usage, workspaces
+from .routes import benchmark, budget, export, forecast, logs, sessions, summary, usage, workspaces
 from .supabase_client import supabase
 
 log = logging.getLogger(__name__)
@@ -66,6 +66,7 @@ app.include_router(forecast.router)
 app.include_router(budget.router)
 app.include_router(export.router)
 app.include_router(sessions.router)
+app.include_router(logs.router)
 # Server-to-server only: gated by INTERNAL_API_TOKEN, not a txk- key, and
 # deliberately outside the CORS allowlist below (no browser calls it).
 app.include_router(workspaces.router)
