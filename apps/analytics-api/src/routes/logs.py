@@ -24,12 +24,10 @@ from ..db import db, f
 router = APIRouter(prefix="/api/v1", tags=["logs"])
 
 _DEFAULT_WINDOW = timedelta(hours=24)
-_STATUS_VALUES = {"success", "error", "blocked"}
-
-# Requests rejected for lack of budget carry this status code (see the
-# gateway's ratelimit/budget middleware) — broken out from generic 4xx/5xx so
-# "blocked" reads as a spend-control event, not an application error.
-_BUDGET_BLOCKED_STATUS = 402
+# No "blocked" status: the gateway does not enforce budgets (budgets only
+# alert), so it never rejects a request for spend. Add it back alongside
+# real enforcement.
+_STATUS_VALUES = {"success", "error"}
 
 
 def _encode_cursor(ts: datetime, request_id: Any) -> str:
@@ -86,9 +84,7 @@ def _build_filters(
     if status == "success":
         conditions.append("status_code < 400")
     elif status == "error":
-        conditions.append(f"status_code >= 400 AND status_code != {_BUDGET_BLOCKED_STATUS}")
-    elif status == "blocked":
-        conditions.append(f"status_code = {_BUDGET_BLOCKED_STATUS}")
+        conditions.append("status_code >= 400")
 
     return conditions, params
 
