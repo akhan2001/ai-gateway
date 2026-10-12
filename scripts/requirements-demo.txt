@@ -1,0 +1,7 @@
+# Dependencies for scripts/seed_demo_workspace.py and scripts/demo_request.py.
+# Not part of either service's own requirements.txt: this is a standalone
+# operator script, run by hand, not deployed.
+asyncpg==0.30.0
+cryptography==44.0.0
+supabase==2.31.0
+httpx==0.28.1
