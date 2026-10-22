@@ -33,6 +33,21 @@ LEDGER_COLUMNS = (
     "status_code",
     "is_stream",
     "priced",
+    # Token anatomy (sql/008). Nullable: older rows and error rows have none.
+    "system_tokens",
+    "tool_tokens",
+    "history_tokens",
+    "user_tokens",
+    "tool_count",
+    "cache_write_tokens",
+    "uncached_input_tokens",
+    "max_output_tokens",
+    "prefix_hash",
+    "uncached_input_cost_usd",
+    "cache_write_cost_usd",
+    "cache_read_cost_usd",
+    "output_cost_usd",
+    "prefix_cache_saving_usd",
 )
 
 
@@ -66,6 +81,22 @@ class UsageRecord:
     status_code: int
     is_stream: bool
     priced: bool
+
+    # Counts and one salted hash only. Never message text.
+    system_tokens: int | None = None
+    tool_tokens: int | None = None
+    history_tokens: int | None = None
+    user_tokens: int | None = None
+    tool_count: int | None = None
+    cache_write_tokens: int | None = None
+    uncached_input_tokens: int | None = None
+    max_output_tokens: int | None = None
+    prefix_hash: str | None = None
+    uncached_input_cost_usd: float | None = None
+    cache_write_cost_usd: float | None = None
+    cache_read_cost_usd: float | None = None
+    output_cost_usd: float | None = None
+    prefix_cache_saving_usd: float | None = None
 
     def as_tuple(self) -> tuple[Any, ...]:
         return tuple(getattr(self, column) for column in _FIELD_ORDER)

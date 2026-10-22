@@ -25,6 +25,7 @@ from ..providers.azure import AzureConfigError
 from ..providers.base import ProviderAdapter, StreamState
 from ..providers.registry import get_adapter, known_providers
 from ..services.acpi import utcnow
+from ..services.anatomy import measure, split_tokens
 from ..services.cost import price_request
 from ..services.ratelimit import rate_limited_response
 from ..services.usage import Usage, usage_from_obj
@@ -163,10 +164,12 @@ async def proxy(provider: str, path: str, request: Request) -> Response:
 
     if is_stream:
         return await _proxy_stream(
-            app, client, adapter, translated, request_id, principal, model_id, tags, session, started
+            app, client, adapter, translated, request_id, principal, model_id, tags, session, started,
+            payload,
         )
     return await _proxy_buffered(
-        app, client, adapter, translated, request_id, principal, model_id, tags, session, started
+        app, client, adapter, translated, request_id, principal, model_id, tags, session, started,
+        payload,
     )
 
 
@@ -186,6 +189,7 @@ async def _proxy_buffered(
     tags: tuple[str | None, str | None],
     session: SessionSignals,
     started: float,
+    payload: dict[str, Any],
 ) -> Response:
     try:
         upstream = await client.post(
@@ -229,7 +233,7 @@ async def _proxy_buffered(
 
     _record(
         app, request_id, principal, adapter, served_model, usage, tags, session,
-        upstream.status_code, False, started, latency_ms=latency_ms,
+        upstream.status_code, False, started, latency_ms=latency_ms, payload=payload,
     )
     return JSONResponse(status_code=upstream.status_code, content=body)
 
@@ -250,6 +254,7 @@ async def _proxy_stream(
     tags: tuple[str | None, str | None],
     session: SessionSignals,
     started: float,
+    payload: dict[str, Any],
 ) -> Response:
     state = StreamState(model=model_id)
 
@@ -292,7 +297,7 @@ async def _proxy_stream(
             # cancelled stream still bills for the tokens already produced.
             _record(
                 app, request_id, principal, adapter, state.model or model_id,
-                state.usage, tags, session, status, True, started,
+                state.usage, tags, session, status, True, started, payload=payload,
             )
 
     return StreamingResponse(
@@ -385,12 +390,24 @@ def _record(
     is_stream: bool,
     started: float,
     latency_ms: int | None = None,
+    payload: dict[str, Any] | None = None,
 ) -> None:
-    """Price and enqueue one ledger row. Never raises."""
+    """Price and enqueue one ledger row. Never raises, and never records content:
+    only the payload's section sizes and a salted prefix hash are kept."""
     try:
+        sections: tuple[int, int, int, int] | None = None
+        anatomy = None
+        if payload is not None and usage.input_tokens > 0:
+            anatomy = measure(payload, principal.workspace_id, forwards_tools=adapter.forwards_tools)
+            sections = split_tokens(anatomy, usage.input_tokens)
+        prefix_tokens = sections[0] + sections[1] if sections else 0
         priced = price_request(
-            app.state.acpi, adapter.name, model_id, usage.input_tokens, usage.output_tokens
+            app.state.acpi, adapter.name, model_id, usage.input_tokens, usage.output_tokens,
+            cache_read_tokens=usage.cached_input_tokens,
+            cache_write_tokens=usage.cache_write_tokens,
+            uncached_prefix_tokens=max(prefix_tokens - usage.cached_input_tokens, 0),
         )
+        has_parts = priced.priced and sections is not None
         feature_tag, workload_tag = tags
         app.state.db.enqueue(
             UsageRecord(
@@ -420,6 +437,20 @@ def _record(
                 status_code=status_code,
                 is_stream=is_stream,
                 priced=priced.priced,
+                system_tokens=sections[0] if sections else None,
+                tool_tokens=sections[1] if sections else None,
+                history_tokens=sections[2] if sections else None,
+                user_tokens=sections[3] if sections else None,
+                tool_count=anatomy.tool_count if anatomy else None,
+                cache_write_tokens=usage.cache_write_tokens if sections else None,
+                uncached_input_tokens=usage.uncached_input_tokens if sections else None,
+                max_output_tokens=anatomy.max_output_tokens if anatomy else None,
+                prefix_hash=anatomy.prefix_hash if anatomy else None,
+                uncached_input_cost_usd=priced.uncached_input_cost_usd if has_parts else None,
+                cache_write_cost_usd=priced.cache_write_cost_usd if has_parts else None,
+                cache_read_cost_usd=priced.cache_read_cost_usd if has_parts else None,
+                output_cost_usd=priced.output_cost_usd if has_parts else None,
+                prefix_cache_saving_usd=priced.prefix_cache_saving_usd if has_parts else None,
             )
         )
     except Exception:

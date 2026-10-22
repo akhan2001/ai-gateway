@@ -2,13 +2,18 @@
 
 Two numbers come out of here and they must not be conflated:
 
-* ``cost_usd`` — what the request actually cost at the model's list price.
+* ``cost_usd`` — what the request actually cost at the model's list price,
+  **net of caching**: uncached input, cache writes, cache reads and output are
+  each priced at their own rate. Same formulas as demos/compression-lab.
 * ``acpi_bench_usd`` — what the *same token volume* would cost at the
   market-wide ACPI rate (the headline "$ per 1M Standard Compute Units").
 
 Benchmarking a model against its own list price would make overpayment
 identically zero on every request, which is why the market rate — not the
 per-model rate — is the comparison basis.
+
+This module is the only place cache pricing lives. The analytics API reads the
+per-part costs written to the ledger instead of re-deriving them.
 """
 
 from __future__ import annotations
@@ -21,6 +26,37 @@ from .acpi import AcpiCatalog
 
 log = logging.getLogger(__name__)
 
+#: Cache rates are multipliers of the model's input price. The ACPI catalog
+#: carries input/output prices only, so these come from provider pricing pages.
+CACHE_PRICING_AS_OF = "2026-10-06"
+
+# (read multiplier, write multiplier). Write is the 5-minute TTL on Anthropic;
+# OpenAI and Gemini caching is implicit, with no write premium.
+_PROVIDER_CACHE_RATES: dict[str, tuple[float, float]] = {
+    "anthropic": (0.10, 1.25),
+    "openai": (0.50, 1.0),
+    "azure": (0.50, 1.0),
+    "google": (0.25, 1.0),
+}
+
+# Model-family overrides, longest prefix wins. ponytail: prefix table by hand;
+# move into the ACPI dataset if the catalog ever carries cache prices.
+_MODEL_CACHE_RATES: dict[str, tuple[float, float]] = {
+    "claude-fable-5-1": (0.025, 1.25),
+    "claude-mythos-5-1": (0.025, 1.25),
+    "claude-opus-5-5": (0.05, 1.25),
+    "gpt-5": (0.10, 1.0),
+    "gpt-4.1": (0.25, 1.0),
+}
+
+
+def cache_rates(provider: str, model_id: str) -> tuple[float, float]:
+    """(read, write) multipliers of the input price for this model."""
+    matches = [prefix for prefix in _MODEL_CACHE_RATES if model_id.startswith(prefix)]
+    if matches:
+        return _MODEL_CACHE_RATES[max(matches, key=len)]
+    return _PROVIDER_CACHE_RATES.get(provider, (1.0, 1.0))
+
 
 @dataclass(frozen=True)
 class Priced:
@@ -32,6 +68,14 @@ class Priced:
     #: False when the model was absent from the ACPI dataset and priced at 0.
     #: Analytics must exclude these rather than report them as free.
     priced: bool
+    # The billed parts; cost_usd is their sum.
+    uncached_input_cost_usd: float = 0.0
+    cache_write_cost_usd: float = 0.0
+    cache_read_cost_usd: float = 0.0
+    output_cost_usd: float = 0.0
+    #: What caching the given prefix tokens would save on this request, at
+    #: this model's read rate. Feeds the "enable caching" recommendation.
+    prefix_cache_saving_usd: float = 0.0
 
     @property
     def overpay_pct(self) -> float | None:
@@ -46,16 +90,27 @@ def price_request(
     model_id: str,
     input_tokens: int,
     output_tokens: int,
+    *,
+    cache_read_tokens: int = 0,
+    cache_write_tokens: int = 0,
+    uncached_prefix_tokens: int = 0,
 ) -> Priced:
+    """`input_tokens` is the whole prompt; the cache counts are parts of it."""
     entry = catalog.lookup(provider, model_id)
 
     if entry is None:
         log.debug("no ACPI entry for %s/%s; recording unpriced", provider, model_id)
         return Priced(0.0, 0.0, 0.0, None, catalog.version, priced=False)
 
-    cost = (
-        input_tokens * entry.input_per_million + output_tokens * entry.output_per_million
-    ) / 1_000_000
+    read_rate, write_rate = cache_rates(provider, model_id)
+    per_input = entry.input_per_million / 1_000_000
+    uncached = max(input_tokens - cache_read_tokens - cache_write_tokens, 0)
+
+    uncached_cost = uncached * per_input
+    write_cost = cache_write_tokens * per_input * write_rate
+    read_cost = cache_read_tokens * per_input * read_rate
+    output_cost = output_tokens * entry.output_per_million / 1_000_000
+    cost = uncached_cost + write_cost + read_cost + output_cost
 
     market_rate = catalog.market_rate_per_million
     benchmark = (
@@ -69,4 +124,9 @@ def price_request(
         acpi_score=entry.acpi_score,
         dataset_version=catalog.version,
         priced=True,
+        uncached_input_cost_usd=uncached_cost,
+        cache_write_cost_usd=write_cost,
+        cache_read_cost_usd=read_cost,
+        output_cost_usd=output_cost,
+        prefix_cache_saving_usd=uncached_prefix_tokens * per_input * (1 - read_rate),
     )

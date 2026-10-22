@@ -4,6 +4,10 @@
 * Anthropic: ``usage.input_tokens`` / ``output_tokens``
 * Google Gemini: ``usageMetadata.promptTokenCount`` / ``candidatesTokenCount``
 
+``input_tokens`` is always the *whole* prompt, cached parts included. OpenAI and
+Gemini already report it that way; Anthropic reports uncached input separately
+from cache reads and writes, so those are added back here.
+
 Token counts are read from what the provider actually reports — never
 estimated locally — because the provider's count is what the customer is
 billed on, and an approximation would put the whole ledger subtly out of step
@@ -21,7 +25,14 @@ from typing import Any, Iterator
 class Usage:
     input_tokens: int = 0
     output_tokens: int = 0
+    #: Prompt tokens served from the provider's cache (billed at a discount).
     cached_input_tokens: int = 0
+    #: Prompt tokens written to the cache this request (Anthropic only; billed at a premium).
+    cache_write_tokens: int = 0
+
+    @property
+    def uncached_input_tokens(self) -> int:
+        return max(self.input_tokens - self.cached_input_tokens - self.cache_write_tokens, 0)
 
     @property
     def is_empty(self) -> bool:
@@ -42,6 +53,7 @@ class Usage:
             input_tokens=other.input_tokens or self.input_tokens,
             output_tokens=other.output_tokens or self.output_tokens,
             cached_input_tokens=other.cached_input_tokens or self.cached_input_tokens,
+            cache_write_tokens=other.cache_write_tokens or self.cache_write_tokens,
         )
 
 
@@ -87,10 +99,14 @@ def usage_from_obj(obj: Any) -> Usage:
         )
 
     if "input_tokens" in usage or "output_tokens" in usage:
+        read = _as_int(usage.get("cache_read_input_tokens"))
+        write = _as_int(usage.get("cache_creation_input_tokens"))
+        uncached = _as_int(usage.get("input_tokens"))
         return Usage(
-            input_tokens=_as_int(usage.get("input_tokens")),
+            input_tokens=uncached + read + write,
             output_tokens=_as_int(usage.get("output_tokens")),
-            cached_input_tokens=_as_int(usage.get("cache_read_input_tokens")),
+            cached_input_tokens=read,
+            cache_write_tokens=write,
         )
 
     return Usage()

@@ -21,6 +21,28 @@ from ..models.log import LEDGER_COLUMNS, UsageRecord
 
 log = logging.getLogger(__name__)
 
+# sql/008_token_anatomy.sql, embedded because the gateway image doesn't ship sql/.
+# Run before the writer starts: the COPY names these columns.
+_LEDGER_MIGRATIONS = [
+    f"ALTER TABLE usage_records ADD COLUMN IF NOT EXISTS {column} {kind}"
+    for column, kind in (
+        ("system_tokens", "INTEGER"),
+        ("tool_tokens", "INTEGER"),
+        ("history_tokens", "INTEGER"),
+        ("user_tokens", "INTEGER"),
+        ("tool_count", "INTEGER"),
+        ("cache_write_tokens", "BIGINT"),
+        ("uncached_input_tokens", "BIGINT"),
+        ("max_output_tokens", "INTEGER"),
+        ("prefix_hash", "TEXT"),
+        ("uncached_input_cost_usd", "NUMERIC(16, 8)"),
+        ("cache_write_cost_usd", "NUMERIC(16, 8)"),
+        ("cache_read_cost_usd", "NUMERIC(16, 8)"),
+        ("output_cost_usd", "NUMERIC(16, 8)"),
+        ("prefix_cache_saving_usd", "NUMERIC(16, 8)"),
+    )
+]
+
 
 @dataclass
 class WriterStats:
@@ -62,6 +84,15 @@ class Database:
 
     async def start(self) -> None:
         self.pool = await asyncpg.create_pool(self._dsn, min_size=1, max_size=10)
+        # A failed migration must not stop the proxy: customer traffic matters
+        # more than ledger rows, which would fail to write until it's fixed.
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.transaction():
+                    for statement in _LEDGER_MIGRATIONS:
+                        await conn.execute(statement)
+        except Exception:
+            log.exception("ledger migration 008_token_anatomy failed; ledger writes will fail")
         self._queue = asyncio.Queue(maxsize=self._queue_capacity)
         self._task = asyncio.create_task(self._drain_forever())
         log.info("database pool up, ledger writer started")
