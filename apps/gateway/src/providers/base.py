@@ -54,6 +54,9 @@ class ProviderAdapter(ABC):
     name: str
     #: Upstream API root, no trailing slash.
     base_url: str
+    #: Whether `tools` reach the provider. Adapters that drop them must not have
+    #: tool definitions counted into their token anatomy.
+    forwards_tools: bool = False
 
     # -- request ------------------------------------------------------------
 
