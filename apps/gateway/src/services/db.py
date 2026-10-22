@@ -23,25 +23,49 @@ log = logging.getLogger(__name__)
 
 # sql/008_token_anatomy.sql, embedded because the gateway image doesn't ship sql/.
 # Run before the writer starts: the COPY names these columns.
-_LEDGER_MIGRATIONS = [
-    f"ALTER TABLE usage_records ADD COLUMN IF NOT EXISTS {column} {kind}"
-    for column, kind in (
-        ("system_tokens", "INTEGER"),
-        ("tool_tokens", "INTEGER"),
-        ("history_tokens", "INTEGER"),
-        ("user_tokens", "INTEGER"),
-        ("tool_count", "INTEGER"),
-        ("cache_write_tokens", "BIGINT"),
-        ("uncached_input_tokens", "BIGINT"),
-        ("max_output_tokens", "INTEGER"),
-        ("prefix_hash", "TEXT"),
-        ("uncached_input_cost_usd", "NUMERIC(16, 8)"),
-        ("cache_write_cost_usd", "NUMERIC(16, 8)"),
-        ("cache_read_cost_usd", "NUMERIC(16, 8)"),
-        ("output_cost_usd", "NUMERIC(16, 8)"),
-        ("prefix_cache_saving_usd", "NUMERIC(16, 8)"),
-    )
-]
+_LEDGER_COLUMNS_008 = (
+    ("system_tokens", "INTEGER"),
+    ("tool_tokens", "INTEGER"),
+    ("history_tokens", "INTEGER"),
+    ("user_tokens", "INTEGER"),
+    ("tool_count", "INTEGER"),
+    ("cache_write_tokens", "BIGINT"),
+    ("uncached_input_tokens", "BIGINT"),
+    ("max_output_tokens", "INTEGER"),
+    ("prefix_hash", "TEXT"),
+    ("uncached_input_cost_usd", "NUMERIC(16, 8)"),
+    ("cache_write_cost_usd", "NUMERIC(16, 8)"),
+    ("cache_read_cost_usd", "NUMERIC(16, 8)"),
+    ("output_cost_usd", "NUMERIC(16, 8)"),
+    ("prefix_cache_saving_usd", "NUMERIC(16, 8)"),
+)
+
+
+async def _apply_ledger_migration(conn: asyncpg.Connection) -> None:
+    """Add any missing 008 columns.
+
+    Checks first, because even ``ADD COLUMN IF NOT EXISTS`` takes an ACCESS
+    EXCLUSIVE lock on the hypertable; doing that on every restart would stall
+    ledger inserts and analytics reads behind it. When columns are missing, a
+    short lock_timeout keeps a long-running analytics query from making the
+    ALTER queue every insert behind it: on timeout this fails, logs, and the
+    next restart retries. Concurrent replicas are safe: Postgres serializes the
+    ALTERs on that lock and IF NOT EXISTS makes the loser a no-op.
+    """
+    present = {
+        row["column_name"]
+        for row in await conn.fetch(
+            "SELECT column_name FROM information_schema.columns WHERE table_name = 'usage_records'"
+        )
+    }
+    missing = [(name, kind) for name, kind in _LEDGER_COLUMNS_008 if name not in present]
+    if not missing:
+        return
+    async with conn.transaction():
+        await conn.execute("SET LOCAL lock_timeout = '5s'")
+        for name, kind in missing:
+            await conn.execute(f"ALTER TABLE usage_records ADD COLUMN IF NOT EXISTS {name} {kind}")
+    log.info("ledger migration 008_token_anatomy added %d columns", len(missing))
 
 
 @dataclass
@@ -88,9 +112,7 @@ class Database:
         # more than ledger rows, which would fail to write until it's fixed.
         try:
             async with self.pool.acquire() as conn:
-                async with conn.transaction():
-                    for statement in _LEDGER_MIGRATIONS:
-                        await conn.execute(statement)
+                await _apply_ledger_migration(conn)
         except Exception:
             log.exception("ledger migration 008_token_anatomy failed; ledger writes will fail")
         self._queue = asyncio.Queue(maxsize=self._queue_capacity)

@@ -27,16 +27,23 @@ from .acpi import AcpiCatalog
 log = logging.getLogger(__name__)
 
 #: Cache rates are multipliers of the model's input price. The ACPI catalog
-#: carries input/output prices only, so these come from provider pricing pages.
-CACHE_PRICING_AS_OF = "2026-10-06"
+#: carries input/output prices only, so these come from the providers' own
+#: pricing pages, checked on this date:
+#:   platform.claude.com/docs/en/about-claude/pricing
+#:   developers.openai.com/api/docs/pricing
+#:   ai.google.dev/gemini-api/docs/pricing
+#: Re-check them when a provider ships a model family.
+CACHE_PRICING_AS_OF = "2026-10-21"
 
-# (read multiplier, write multiplier). Write is the 5-minute TTL on Anthropic;
-# OpenAI and Gemini caching is implicit, with no write premium.
+# (read multiplier, write multiplier). Anthropic's write is the 5-minute TTL
+# (the gateway never sends cache_control, so 1-hour writes can't occur yet).
+# OpenAI and Gemini cache implicitly with no write premium.
 _PROVIDER_CACHE_RATES: dict[str, tuple[float, float]] = {
     "anthropic": (0.10, 1.25),
-    "openai": (0.50, 1.0),
-    "azure": (0.50, 1.0),
-    "google": (0.25, 1.0),
+    "openai": (0.10, 1.0),  # gpt-5.x, gpt-6.x, chat-latest
+    # ponytail: assumes Azure bills cached input like OpenAI; not checked against Azure's page.
+    "azure": (0.10, 1.0),
+    "google": (0.10, 1.0),  # every Gemini model listed
 }
 
 # Model-family overrides, longest prefix wins. ponytail: prefix table by hand;
@@ -45,8 +52,14 @@ _MODEL_CACHE_RATES: dict[str, tuple[float, float]] = {
     "claude-fable-5-1": (0.025, 1.25),
     "claude-mythos-5-1": (0.025, 1.25),
     "claude-opus-5-5": (0.05, 1.25),
-    "gpt-5": (0.10, 1.0),
+    "claude-sonnet-5-5": (0.05, 1.25),
+    "gpt-6.1-sol": (0.05, 1.0),
     "gpt-4.1": (0.25, 1.0),
+    "gpt-4o": (0.50, 1.0),
+    "o1": (0.50, 1.0),
+    "o3": (0.25, 1.0),
+    "o3-mini": (0.50, 1.0),
+    "o4-mini": (0.25, 1.0),
 }
 
 

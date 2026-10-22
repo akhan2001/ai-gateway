@@ -128,11 +128,11 @@ def test_anthropic_usage_is_normalized_to_whole_prompt():
 
 
 def test_cost_parts_match_billed_usage_anthropic(catalog):
-    # 100 uncached, 2,000 written, 8,000 read, 50 output on Sonnet 5.5 ($2 / $10).
+    # 100 uncached, 2,000 written, 8,000 read, 50 output on Sonnet 5.5 ($2 / $10, reads at 0.05x).
     p = price_request(catalog, "anthropic", "claude-sonnet-5-5", 10_100, 50, cache_read_tokens=8000, cache_write_tokens=2000)
     assert p.uncached_input_cost_usd == pytest.approx(100 * 2 / 1e6)
     assert p.cache_write_cost_usd == pytest.approx(2000 * 2 * 1.25 / 1e6)
-    assert p.cache_read_cost_usd == pytest.approx(8000 * 2 * 0.10 / 1e6)
+    assert p.cache_read_cost_usd == pytest.approx(8000 * 2 * 0.05 / 1e6)
     assert p.output_cost_usd == pytest.approx(50 * 10 / 1e6)
     assert p.cost_usd == pytest.approx(p.uncached_input_cost_usd + p.cache_write_cost_usd + p.cache_read_cost_usd + p.output_cost_usd)
 
@@ -149,10 +149,36 @@ def test_no_cache_cost_is_unchanged(catalog):
     assert price_request(catalog, "openai", "gpt-4o", 1_000_000, 1_000_000).cost_usd == pytest.approx(12.5)
 
 
-def test_cache_rate_overrides():
-    assert cache_rates("anthropic", "claude-opus-5-5") == (0.05, 1.25)
-    assert cache_rates("anthropic", "claude-sonnet-5-5") == (0.10, 1.25)
-    assert cache_rates("openai", "gpt-5.1-mini") == (0.10, 1.0)
+@pytest.mark.parametrize(
+    ("provider", "model", "read_rate"),
+    [
+        # Cache read ÷ input, from the provider pages on CACHE_PRICING_AS_OF.
+        ("anthropic", "claude-fable-5-1", 0.25 / 10),
+        ("anthropic", "claude-opus-5-5", 0.20 / 4),
+        ("anthropic", "claude-sonnet-5-5", 0.10 / 2),
+        ("anthropic", "claude-opus-5", 0.50 / 5),
+        ("anthropic", "claude-sonnet-5", 0.20 / 2),
+        ("anthropic", "claude-haiku-5-5", 0.01 / 0.10),
+        ("openai", "gpt-6.1-sol", 0.10 / 2),
+        ("openai", "gpt-6-sol", 0.20 / 2),
+        ("openai", "gpt-5.4-mini", 0.075 / 0.75),
+        ("openai", "chat-latest", 0.50 / 5),
+        ("openai", "gpt-4.1-mini", 0.10 / 0.40),
+        ("openai", "gpt-4o-mini", 0.075 / 0.15),
+        ("openai", "o3", 0.50 / 2),
+        ("openai", "o3-mini", 0.55 / 1.10),
+        ("openai", "o4-mini", 0.275 / 1.10),
+        ("google", "gemini-2.5-pro", 0.125 / 1.25),
+        ("google", "gemini-3.8-flash", 0.075 / 0.75),
+    ],
+)
+def test_cache_read_rates_match_provider_pricing(provider, model, read_rate):
+    assert cache_rates(provider, model)[0] == pytest.approx(read_rate)
+
+
+def test_cache_write_rates():
+    assert cache_rates("anthropic", "claude-opus-5-5")[1] == 1.25  # $5 write on $4 input
+    assert cache_rates("openai", "gpt-5")[1] == 1.0
     assert cache_rates("unknown", "m") == (1.0, 1.0)
 
 
@@ -195,3 +221,51 @@ def test_error_rows_carry_no_anatomy(app):  # noqa: F811
         client.post("/openai/v1/chat/completions", json=agent_payload(), headers={"authorization": f"Bearer {API_KEY}"})
     (row,) = app.state.db.rows
     assert row.system_tokens is None and row.prefix_hash is None
+
+
+# --- startup migration -------------------------------------------------------
+
+
+class FakeConn:
+    def __init__(self, present: set[str]) -> None:
+        self.present = present
+        self.executed: list[str] = []
+
+    async def fetch(self, query: str):
+        return [{"column_name": c} for c in self.present]
+
+    def transaction(self):
+        conn = self
+
+        class Tx:
+            async def __aenter__(self):
+                return conn
+
+            async def __aexit__(self, *exc):
+                return False
+
+        return Tx()
+
+    async def execute(self, statement: str) -> None:
+        self.executed.append(statement)
+
+
+@pytest.mark.asyncio
+async def test_migration_takes_no_lock_when_columns_exist():
+    from src.services.db import _LEDGER_COLUMNS_008, _apply_ledger_migration
+
+    conn = FakeConn({name for name, _ in _LEDGER_COLUMNS_008})
+    await _apply_ledger_migration(conn)
+    assert conn.executed == []
+
+
+@pytest.mark.asyncio
+async def test_migration_adds_only_missing_columns_under_a_lock_timeout():
+    from src.services.db import _LEDGER_COLUMNS_008, _apply_ledger_migration
+
+    conn = FakeConn({name for name, _ in _LEDGER_COLUMNS_008[1:]})
+    await _apply_ledger_migration(conn)
+    assert conn.executed == [
+        "SET LOCAL lock_timeout = '5s'",
+        "ALTER TABLE usage_records ADD COLUMN IF NOT EXISTS system_tokens INTEGER",
+    ]
