@@ -9,13 +9,18 @@ Every recommendation is an estimate and says so, with the numbers behind it.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 from uuid import UUID
 
+import asyncpg
 from fastapi import APIRouter, Depends, Query
+from pydantic import BaseModel
 
 from ..auth import current_workspace
 from ..db import db, f
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/optimize", tags=["optimize"])
 
@@ -227,3 +232,77 @@ async def anatomy(days: int = Query(30, ge=1, le=90), workspace_id: UUID = Depen
 @router.get("/recommendations")
 async def recommendations(days: int = Query(30, ge=1, le=90), workspace_id: UUID = Depends(current_workspace)) -> dict:
     return build_recommendations(await fetch_groups(workspace_id, days), days)
+
+
+# --- compression shadow mode (sql/009) -------------------------------------
+
+SHADOW_DAYS = 7
+
+# Read via to_jsonb so a database the gateway hasn't migrated yet reads "off".
+_SHADOW_ENABLED_SQL = """
+SELECT COALESCE((to_jsonb(w) ->> 'compression_shadow')::boolean, FALSE) AS enabled
+FROM workspaces w WHERE w.id = $1
+"""
+
+# Both savings over the same requests: the ones shadow mode measured.
+_SHADOW_SQL = """
+SELECT COALESCE(feature_tag, '(untagged)') AS feature,
+       COALESCE(step_name, '(none)')     AS step,
+       COUNT(*)                          AS requests,
+       SUM(input_tokens)                 AS input_tokens,
+       SUM(shadow_saving_tokens)         AS saving_tokens,
+       SUM(shadow_saving_usd)            AS compression_usd,
+       SUM(prefix_cache_saving_usd)      AS caching_usd,
+       COUNT(*) FILTER (WHERE shadow_prefix_changed) AS prefix_changed_requests
+FROM usage_records
+WHERE workspace_id = $1 AND shadow_saving_usd IS NOT NULL
+  AND "timestamp" >= NOW() - make_interval(days => $2)
+GROUP BY 1, 2
+ORDER BY compression_usd DESC
+"""
+
+
+def build_shadow(enabled: bool, rows: list[dict[str, Any]]) -> dict[str, Any]:
+    steps = [
+        {
+            "feature": row["feature"],
+            "step": row["step"],
+            "requests": int(row["requests"]),
+            "input_tokens": int(row["input_tokens"] or 0),
+            "saving_tokens": int(row["saving_tokens"] or 0),
+            "compression_usd": round(f(row["compression_usd"]), 6),
+            "caching_usd": round(f(row["caching_usd"]), 6),
+            "prefix_changed_requests": int(row["prefix_changed_requests"]),
+        }
+        for row in rows
+    ]
+    return {
+        "enabled": enabled,
+        "days": SHADOW_DAYS,
+        "estimate": True,
+        "outputs_compared": False,
+        "steps": steps,
+        "compression_usd": round(sum(s["compression_usd"] for s in steps), 6),
+        "caching_usd": round(sum(s["caching_usd"] for s in steps), 6),
+    }
+
+
+@router.get("/shadow")
+async def shadow(workspace_id: UUID = Depends(current_workspace)) -> dict:
+    row = await db.fetchrow(_SHADOW_ENABLED_SQL, workspace_id)
+    try:
+        rows = await db.fetch(_SHADOW_SQL, workspace_id, SHADOW_DAYS)
+    except asyncpg.UndefinedColumnError:
+        log.warning("shadow columns missing: the gateway has not applied sql/009 yet")
+        rows = []
+    return build_shadow(bool(row and row["enabled"]), rows)
+
+
+class ShadowSetting(BaseModel):
+    enabled: bool
+
+
+@router.post("/shadow")
+async def set_shadow(body: ShadowSetting, workspace_id: UUID = Depends(current_workspace)) -> dict:
+    await db.fetchrow("UPDATE workspaces SET compression_shadow = $2 WHERE id = $1 RETURNING id", workspace_id, body.enabled)
+    return {"enabled": body.enabled}

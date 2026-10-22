@@ -143,3 +143,41 @@ def price_request(
         output_cost_usd=output_cost,
         prefix_cache_saving_usd=uncached_prefix_tokens * per_input * (1 - read_rate),
     )
+
+
+def input_saving_usd(
+    catalog: AcpiCatalog,
+    provider: str,
+    model_id: str,
+    spans: tuple[tuple[float, float, float], ...],
+    *,
+    cache_read_tokens: int,
+    cache_write_tokens: int,
+) -> float | None:
+    """What removing tokens from a prompt saves, net of caching, or None if unpriced.
+
+    `spans` is (start, end, saved) per changed message: its token span in the
+    original prompt and the tokens removed from it. The provider caches a
+    prefix, so position decides the rate: the first `cache_read_tokens` were
+    billed at the read rate, the next `cache_write_tokens` at the write rate,
+    the rest at the full input rate. Saved tokens are spread evenly over their
+    span and priced at the rates of the positions they occupied.
+    """
+    entry = catalog.lookup(provider, model_id)
+    if entry is None:
+        return None
+    read_rate, write_rate = cache_rates(provider, model_id)
+    cached_end = cache_read_tokens + cache_write_tokens
+    bands = (
+        (0, cache_read_tokens, read_rate),
+        (cache_read_tokens, cached_end, write_rate),
+        (cached_end, float("inf"), 1.0),
+    )
+    weighted = 0.0
+    for start, end, saved in spans:
+        if end <= start:
+            continue
+        for low, high, rate in bands:
+            overlap = max(0.0, min(end, high) - max(start, low))
+            weighted += saved * overlap / (end - start) * rate
+    return weighted * entry.input_per_million / 1_000_000

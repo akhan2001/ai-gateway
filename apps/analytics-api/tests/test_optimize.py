@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 from src import db as dbmod
 from src.auth import current_workspace
 from src.main import app
-from src.routes.optimize import MIN_REQUESTS, build_anatomy, build_recommendations
+from src.routes.optimize import MIN_REQUESTS, build_anatomy, build_recommendations, build_shadow
 
 WORKSPACE = uuid4()
 
@@ -106,3 +106,41 @@ def test_endpoints(monkeypatch, rows):
     assert anatomy["days"] == 14 and anatomy["analyzed_requests"] == sum(r["requests"] for r in rows)
     assert recs["min_requests"] == MIN_REQUESTS
     assert bool(recs["recommendations"]) == bool(rows)
+
+
+def test_shadow_compares_compression_and_caching_on_the_same_requests():
+    rows = [
+        {"feature": "support", "step": "triage", "requests": 120, "input_tokens": 1_000_000, "saving_tokens": 80_000,
+         "compression_usd": Decimal("0.12"), "caching_usd": Decimal("1.5"), "prefix_changed_requests": 3},
+        {"feature": "support", "step": "reply", "requests": 40, "input_tokens": 200_000, "saving_tokens": 0,
+         "compression_usd": Decimal("0"), "caching_usd": None, "prefix_changed_requests": 0},
+    ]
+    out = build_shadow(True, rows)
+    assert out["enabled"] and out["estimate"] and out["outputs_compared"] is False
+    assert (out["compression_usd"], out["caching_usd"]) == (0.12, 1.5)
+    assert out["steps"][1]["caching_usd"] == 0.0
+
+
+def test_shadow_endpoints(monkeypatch):
+    calls = []
+
+    async def fake_fetchrow(query: str, *args):
+        calls.append((query, args))
+        return {"enabled": True, "id": WORKSPACE}
+
+    async def fake_fetch(query: str, *args):
+        assert "shadow_saving_usd IS NOT NULL" in query and args == (WORKSPACE, 7)
+        return []
+
+    monkeypatch.setattr(dbmod.db, "fetchrow", fake_fetchrow)
+    monkeypatch.setattr(dbmod.db, "fetch", fake_fetch)
+    app.dependency_overrides[current_workspace] = lambda: WORKSPACE
+    try:
+        client = TestClient(app)
+        assert client.get("/api/v1/optimize/shadow").json()["enabled"] is True
+        assert client.post("/api/v1/optimize/shadow", json={"enabled": False}).json() == {"enabled": False}
+        assert client.post("/api/v1/optimize/shadow", json={"enabled": "maybe"}).status_code == 422
+    finally:
+        app.dependency_overrides.clear()
+    update_query, update_args = calls[-1]
+    assert "UPDATE workspaces SET compression_shadow" in update_query and update_args == (WORKSPACE, False)

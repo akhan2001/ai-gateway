@@ -48,6 +48,11 @@ LEDGER_COLUMNS = (
     "cache_read_cost_usd",
     "output_cost_usd",
     "prefix_cache_saving_usd",
+    # Compression shadow (sql/009). Only for workspaces with compression_shadow on.
+    "shadow_compressed_tokens",
+    "shadow_saving_tokens",
+    "shadow_saving_usd",
+    "shadow_prefix_changed",
 )
 
 
@@ -97,6 +102,10 @@ class UsageRecord:
     cache_read_cost_usd: float | None = None
     output_cost_usd: float | None = None
     prefix_cache_saving_usd: float | None = None
+    shadow_compressed_tokens: int | None = None
+    shadow_saving_tokens: int | None = None
+    shadow_saving_usd: float | None = None
+    shadow_prefix_changed: bool | None = None
 
     def as_tuple(self) -> tuple[Any, ...]:
         return tuple(getattr(self, column) for column in _FIELD_ORDER)

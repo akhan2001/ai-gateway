@@ -8,6 +8,8 @@ logged and swallowed.
 
 from __future__ import annotations
 
+import asyncio
+import dataclasses
 import json
 import logging
 import time
@@ -26,7 +28,8 @@ from ..providers.base import ProviderAdapter, StreamState
 from ..providers.registry import get_adapter, known_providers
 from ..services.acpi import utcnow
 from ..services.anatomy import measure, split_tokens
-from ..services.cost import price_request
+from ..services import shadow
+from ..services.cost import input_saving_usd, price_request
 from ..services.ratelimit import rate_limited_response
 from ..services.usage import Usage, usage_from_obj
 
@@ -409,49 +412,92 @@ def _record(
         )
         has_parts = priced.priced and sections is not None
         feature_tag, workload_tag = tags
-        app.state.db.enqueue(
-            UsageRecord(
-                request_id=request_id,
-                timestamp=utcnow(),
-                workspace_id=principal.workspace_id,
-                provider=adapter.name,
-                model_id=model_id,
-                feature_tag=feature_tag,
-                workload_tag=workload_tag,
-                session_id=session.session_id,
-                step_name=session.step_name,
-                session_name=session.session_name,
-                session_status=session.session_status,
-                auto_generated=session.auto_generated,
-                input_tokens=usage.input_tokens,
-                output_tokens=usage.output_tokens,
-                cached_input_tokens=usage.cached_input_tokens,
-                cost_usd=priced.cost_usd,
-                acpi_bench_usd=priced.acpi_bench_usd,
-                overpay_usd=priced.overpay_usd,
-                acpi_score=priced.acpi_score,
-                acpi_dataset_version=priced.dataset_version,
-                latency_ms=latency_ms
-                if latency_ms is not None
-                else int((time.monotonic() - started) * 1000),
-                status_code=status_code,
-                is_stream=is_stream,
-                priced=priced.priced,
-                system_tokens=sections[0] if sections else None,
-                tool_tokens=sections[1] if sections else None,
-                history_tokens=sections[2] if sections else None,
-                user_tokens=sections[3] if sections else None,
-                tool_count=anatomy.tool_count if anatomy else None,
-                cache_write_tokens=usage.cache_write_tokens if sections else None,
-                uncached_input_tokens=usage.uncached_input_tokens if sections else None,
-                max_output_tokens=anatomy.max_output_tokens if anatomy else None,
-                prefix_hash=anatomy.prefix_hash if anatomy else None,
-                uncached_input_cost_usd=priced.uncached_input_cost_usd if has_parts else None,
-                cache_write_cost_usd=priced.cache_write_cost_usd if has_parts else None,
-                cache_read_cost_usd=priced.cache_read_cost_usd if has_parts else None,
-                output_cost_usd=priced.output_cost_usd if has_parts else None,
-                prefix_cache_saving_usd=priced.prefix_cache_saving_usd if has_parts else None,
-            )
+        record = UsageRecord(
+            request_id=request_id,
+            timestamp=utcnow(),
+            workspace_id=principal.workspace_id,
+            provider=adapter.name,
+            model_id=model_id,
+            feature_tag=feature_tag,
+            workload_tag=workload_tag,
+            session_id=session.session_id,
+            step_name=session.step_name,
+            session_name=session.session_name,
+            session_status=session.session_status,
+            auto_generated=session.auto_generated,
+            input_tokens=usage.input_tokens,
+            output_tokens=usage.output_tokens,
+            cached_input_tokens=usage.cached_input_tokens,
+            cost_usd=priced.cost_usd,
+            acpi_bench_usd=priced.acpi_bench_usd,
+            overpay_usd=priced.overpay_usd,
+            acpi_score=priced.acpi_score,
+            acpi_dataset_version=priced.dataset_version,
+            latency_ms=latency_ms
+            if latency_ms is not None
+            else int((time.monotonic() - started) * 1000),
+            status_code=status_code,
+            is_stream=is_stream,
+            priced=priced.priced,
+            system_tokens=sections[0] if sections else None,
+            tool_tokens=sections[1] if sections else None,
+            history_tokens=sections[2] if sections else None,
+            user_tokens=sections[3] if sections else None,
+            tool_count=anatomy.tool_count if anatomy else None,
+            cache_write_tokens=usage.cache_write_tokens if sections else None,
+            uncached_input_tokens=usage.uncached_input_tokens if sections else None,
+            max_output_tokens=anatomy.max_output_tokens if anatomy else None,
+            prefix_hash=anatomy.prefix_hash if anatomy else None,
+            uncached_input_cost_usd=priced.uncached_input_cost_usd if has_parts else None,
+            cache_write_cost_usd=priced.cache_write_cost_usd if has_parts else None,
+            cache_read_cost_usd=priced.cache_read_cost_usd if has_parts else None,
+            output_cost_usd=priced.output_cost_usd if has_parts else None,
+            prefix_cache_saving_usd=priced.prefix_cache_saving_usd if has_parts else None,
         )
+        if has_parts and principal.compression_shadow:
+            task = asyncio.create_task(_shadow_then_enqueue(app, record, payload, adapter, usage))
+            _background.add(task)
+            task.add_done_callback(_background.discard)
+        else:
+            app.state.db.enqueue(record)
     except Exception:
         log.exception("failed to record usage for request %s", request_id)
+
+
+# Strong refs to in-flight shadow tasks, so the loop can't garbage-collect them.
+_background: set[asyncio.Task[None]] = set()
+
+
+async def _shadow_then_enqueue(
+    app: Any, record: UsageRecord, payload: dict[str, Any], adapter: ProviderAdapter, usage: Usage
+) -> None:
+    """Compression shadow mode. Runs after the response has been handed back,
+    on a worker thread so a large request can't stall the event loop, and only
+    delays the ledger row, never the customer. The row is written either way."""
+    try:
+        record = await asyncio.to_thread(_with_shadow, app.state.acpi, record, payload, adapter, usage)
+    except Exception as exc:
+        # Type only: an exception message could quote the payload.
+        log.error("compression shadow failed for request %s: %s", record.request_id, type(exc).__name__)
+    app.state.db.enqueue(record)
+
+
+def _with_shadow(
+    catalog: Any, record: UsageRecord, payload: dict[str, Any], adapter: ProviderAdapter, usage: Usage
+) -> UsageRecord:
+    estimate = shadow.estimate(
+        payload, usage.input_tokens, usage.cached_input_tokens, forwards_tools=adapter.forwards_tools
+    )
+    if estimate is None:
+        return record
+    saving_usd = input_saving_usd(
+        catalog, adapter.name, record.model_id, estimate.spans,
+        cache_read_tokens=usage.cached_input_tokens, cache_write_tokens=usage.cache_write_tokens,
+    )
+    return dataclasses.replace(
+        record,
+        shadow_compressed_tokens=estimate.compressed_tokens,
+        shadow_saving_tokens=estimate.saving_tokens,
+        shadow_saving_usd=saving_usd,
+        shadow_prefix_changed=estimate.touches_cached_prefix,
+    )

@@ -40,9 +40,20 @@ _LEDGER_COLUMNS_008 = (
     ("prefix_cache_saving_usd", "NUMERIC(16, 8)"),
 )
 
+# sql/009_compression_shadow.sql.
+_COLUMNS_009 = (
+    ("usage_records", "shadow_compressed_tokens", "BIGINT"),
+    ("usage_records", "shadow_saving_tokens", "BIGINT"),
+    ("usage_records", "shadow_saving_usd", "NUMERIC(16, 8)"),
+    ("usage_records", "shadow_prefix_changed", "BOOLEAN"),
+    ("workspaces", "compression_shadow", "BOOLEAN NOT NULL DEFAULT FALSE"),
+)
+
+_MIGRATION_COLUMNS = tuple(("usage_records", name, kind) for name, kind in _LEDGER_COLUMNS_008) + _COLUMNS_009
+
 
 async def _apply_ledger_migration(conn: asyncpg.Connection) -> None:
-    """Add any missing 008 columns.
+    """Add any missing 008/009 columns.
 
     Checks first, because even ``ADD COLUMN IF NOT EXISTS`` takes an ACCESS
     EXCLUSIVE lock on the hypertable; doing that on every restart would stall
@@ -53,19 +64,20 @@ async def _apply_ledger_migration(conn: asyncpg.Connection) -> None:
     ALTERs on that lock and IF NOT EXISTS makes the loser a no-op.
     """
     present = {
-        row["column_name"]
+        (row["table_name"], row["column_name"])
         for row in await conn.fetch(
-            "SELECT column_name FROM information_schema.columns WHERE table_name = 'usage_records'"
+            "SELECT table_name, column_name FROM information_schema.columns"
+            " WHERE table_name IN ('usage_records', 'workspaces')"
         )
     }
-    missing = [(name, kind) for name, kind in _LEDGER_COLUMNS_008 if name not in present]
+    missing = [(table, name, kind) for table, name, kind in _MIGRATION_COLUMNS if (table, name) not in present]
     if not missing:
         return
     async with conn.transaction():
         await conn.execute("SET LOCAL lock_timeout = '5s'")
-        for name, kind in missing:
-            await conn.execute(f"ALTER TABLE usage_records ADD COLUMN IF NOT EXISTS {name} {kind}")
-    log.info("ledger migration 008_token_anatomy added %d columns", len(missing))
+        for table, name, kind in missing:
+            await conn.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {name} {kind}")
+    log.info("ledger migrations 008/009 added %d columns", len(missing))
 
 
 @dataclass
@@ -114,7 +126,7 @@ class Database:
             async with self.pool.acquire() as conn:
                 await _apply_ledger_migration(conn)
         except Exception:
-            log.exception("ledger migration 008_token_anatomy failed; ledger writes will fail")
+            log.exception("ledger migrations 008/009 failed; ledger writes will fail")
         self._queue = asyncio.Queue(maxsize=self._queue_capacity)
         self._task = asyncio.create_task(self._drain_forever())
         log.info("database pool up, ledger writer started")
@@ -204,7 +216,11 @@ class Database:
             return None
         row = await self.pool.fetchrow(
             """
-            SELECT k.id AS key_id, k.workspace_id, w.name AS workspace_name
+            SELECT k.id AS key_id, k.workspace_id, w.name AS workspace_name,
+                   -- Read via to_jsonb so a missing column (009 not applied
+                   -- yet) means "off" instead of failing every key lookup.
+                   COALESCE((to_jsonb(w) ->> 'compression_shadow')::boolean, FALSE)
+                       AS compression_shadow
             FROM api_keys k
             JOIN workspaces w ON w.id = k.workspace_id
             WHERE k.key_hash = $1 AND NOT k.revoked AND w.enabled
