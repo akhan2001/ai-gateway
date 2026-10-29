@@ -1,6 +1,8 @@
--- MANUAL, ONE-TIME. Not embedded in the gateway: run it by hand with psql once
--- the newest version-1 prefix hash is more than 30 days old (the Optimize
--- window), so no recommendation still reads them.
+-- Scheduled: the analytics API runs the same check and UPDATE daily
+-- (src/jobs/prefix_hash_cleanup.py) and stops once none are left. This file is
+-- the by-hand equivalent. Either way nothing is cleared until the newest
+-- version-1 prefix hash is more than 30 days old (the Optimize window), so no
+-- recommendation still reads them.
 --
 -- Version-1 hashes are a plain SHA-256 of workspace id + system prompt + tools.
 -- Anyone with a candidate prompt and the workspace id can recompute one and

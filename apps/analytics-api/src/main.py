@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .budget_checker import budget_checker
 from .db import db
+from .jobs.prefix_hash_cleanup import prefix_hash_cleanup
 from .jobs.session_sync import session_sync_worker
 from .migrations import run_startup_migrations
 from .routes import benchmark, budget, cost_methods, export, forecast, logs, optimize, sessions, summary, usage, workspaces
@@ -31,10 +32,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await supabase.start()
     budget_checker.start()
     session_sync_worker.start()
+    prefix_hash_cleanup.start()
     log.info("analytics api ready")
     try:
         yield
     finally:
+        await prefix_hash_cleanup.stop()
         await session_sync_worker.stop()
         await budget_checker.stop()
         await supabase.stop()
