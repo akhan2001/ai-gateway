@@ -201,6 +201,7 @@ def test_request_flows_through_and_is_priced(app):
     assert row.model_id == "gpt-4o-mini"
     assert (row.input_tokens, row.output_tokens) == (1000, 500)
     assert row.priced is True
+    assert row.cost_method_version == 2  # services/cost.py COST_METHOD_VERSION
     # 1000 * 0.15/1M + 500 * 0.60/1M
     assert row.cost_usd == pytest.approx(0.00045)
     # 1500 tokens at the $5.00/1M market rate

@@ -48,6 +48,7 @@ LEDGER_COLUMNS = (
     "cache_read_cost_usd",
     "output_cost_usd",
     "prefix_cache_saving_usd",
+    "cost_method_version",
 )
 
 
@@ -97,6 +98,8 @@ class UsageRecord:
     cache_read_cost_usd: float | None = None
     output_cost_usd: float | None = None
     prefix_cache_saving_usd: float | None = None
+    #: services/cost.py COST_METHOD_VERSION. NULL on rows from before sql/010.
+    cost_method_version: int | None = None
 
     def as_tuple(self) -> tuple[Any, ...]:
         return tuple(getattr(self, column) for column in _FIELD_ORDER)

@@ -26,7 +26,7 @@ from ..providers.base import ProviderAdapter, StreamState
 from ..providers.registry import get_adapter, known_providers
 from ..services.acpi import utcnow
 from ..services.anatomy import measure, split_tokens
-from ..services.cost import price_request
+from ..services.cost import COST_METHOD_VERSION, price_request
 from ..services.ratelimit import rate_limited_response
 from ..services.usage import Usage, usage_from_obj
 
@@ -451,6 +451,7 @@ def _record(
                 cache_read_cost_usd=priced.cache_read_cost_usd if has_parts else None,
                 output_cost_usd=priced.output_cost_usd if has_parts else None,
                 prefix_cache_saving_usd=priced.prefix_cache_saving_usd if has_parts else None,
+                cost_method_version=COST_METHOD_VERSION,
             )
         )
     except Exception:

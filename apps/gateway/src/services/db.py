@@ -21,9 +21,10 @@ from ..models.log import LEDGER_COLUMNS, UsageRecord
 
 log = logging.getLogger(__name__)
 
-# sql/008_token_anatomy.sql, embedded because the gateway image doesn't ship sql/.
+# Ledger migrations, embedded because the gateway image doesn't ship sql/.
 # Run before the writer starts: the COPY names these columns.
-_LEDGER_COLUMNS_008 = (
+_LEDGER_MIGRATION_COLUMNS = (
+    # sql/008_token_anatomy.sql
     ("system_tokens", "INTEGER"),
     ("tool_tokens", "INTEGER"),
     ("history_tokens", "INTEGER"),
@@ -38,6 +39,8 @@ _LEDGER_COLUMNS_008 = (
     ("cache_read_cost_usd", "NUMERIC(16, 8)"),
     ("output_cost_usd", "NUMERIC(16, 8)"),
     ("prefix_cache_saving_usd", "NUMERIC(16, 8)"),
+    # sql/010_cost_method_version.sql
+    ("cost_method_version", "SMALLINT"),
 )
 
 
@@ -51,7 +54,7 @@ async def _ledger_columns_present(conn: asyncpg.Connection) -> set[str]:
 
 
 async def _apply_ledger_migration(conn: asyncpg.Connection) -> None:
-    """Add any missing 008 columns.
+    """Add any missing ledger columns (008, 010).
 
     Checks first, because even ``ADD COLUMN IF NOT EXISTS`` takes an ACCESS
     EXCLUSIVE lock on the hypertable; doing that on every restart would stall
@@ -62,14 +65,14 @@ async def _apply_ledger_migration(conn: asyncpg.Connection) -> None:
     ALTERs on that lock and IF NOT EXISTS makes the loser a no-op.
     """
     present = await _ledger_columns_present(conn)
-    missing = [(name, kind) for name, kind in _LEDGER_COLUMNS_008 if name not in present]
+    missing = [(name, kind) for name, kind in _LEDGER_MIGRATION_COLUMNS if name not in present]
     if not missing:
         return
     async with conn.transaction():
         await conn.execute("SET LOCAL lock_timeout = '5s'")
         for name, kind in missing:
             await conn.execute(f"ALTER TABLE usage_records ADD COLUMN IF NOT EXISTS {name} {kind}")
-    log.info("ledger migration 008_token_anatomy added %d columns", len(missing))
+    log.info("ledger migrations added %d columns", len(missing))
 
 
 @dataclass
@@ -125,7 +128,7 @@ class Database:
             try:
                 await _apply_ledger_migration(conn)
             except Exception:
-                log.exception("ledger migration 008_token_anatomy failed")
+                log.exception("ledger migration failed")
             try:
                 present = await _ledger_columns_present(conn)
             except Exception:

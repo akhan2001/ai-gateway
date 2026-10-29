@@ -252,18 +252,18 @@ class FakeConn:
 
 @pytest.mark.asyncio
 async def test_migration_takes_no_lock_when_columns_exist():
-    from src.services.db import _LEDGER_COLUMNS_008, _apply_ledger_migration
+    from src.services.db import _LEDGER_MIGRATION_COLUMNS, _apply_ledger_migration
 
-    conn = FakeConn({name for name, _ in _LEDGER_COLUMNS_008})
+    conn = FakeConn({name for name, _ in _LEDGER_MIGRATION_COLUMNS})
     await _apply_ledger_migration(conn)
     assert conn.executed == []
 
 
 @pytest.mark.asyncio
 async def test_migration_adds_only_missing_columns_under_a_lock_timeout():
-    from src.services.db import _LEDGER_COLUMNS_008, _apply_ledger_migration
+    from src.services.db import _LEDGER_MIGRATION_COLUMNS, _apply_ledger_migration
 
-    conn = FakeConn({name for name, _ in _LEDGER_COLUMNS_008[1:]})
+    conn = FakeConn({name for name, _ in _LEDGER_MIGRATION_COLUMNS[1:]})
     await _apply_ledger_migration(conn)
     assert conn.executed == [
         "SET LOCAL lock_timeout = '5s'",

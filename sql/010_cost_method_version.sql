@@ -1,0 +1,11 @@
+-- Which cost formula priced each row (gateway services/cost.py COST_METHOD_VERSION),
+-- so a drop in spend at a deploy date can be told apart from a drop in usage.
+--   1  every input token at the full input rate (before 2026-10-21)
+--   2  net of caching: uncached, cache-write, cache-read and output each at their rate
+-- NULL on rows written before this column existed. Not backfilled (the ledger
+-- is append-only); for those rows the method is
+--   CASE WHEN uncached_input_tokens IS NOT NULL THEN 2 ELSE 1 END
+-- (error rows read as 1; they cost 0 either way).
+--
+-- Applied by the gateway at startup (services/db.py). Keep in sync with that list.
+ALTER TABLE usage_records ADD COLUMN IF NOT EXISTS cost_method_version SMALLINT;

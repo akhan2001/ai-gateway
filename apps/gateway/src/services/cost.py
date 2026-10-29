@@ -26,6 +26,13 @@ from .acpi import AcpiCatalog
 
 log = logging.getLogger(__name__)
 
+#: Written on every ledger row, so a chart can tell repricing from usage.
+#: 1: every input token at the full input rate (before 2026-10-21).
+#: 2: net of caching, each billed part at its own rate (below).
+#: Bump it, and document the change in tokenix docs/cost-methodology.md,
+#: whenever the formula or the cache rates change what a request costs.
+COST_METHOD_VERSION = 2
+
 #: Cache rates are multipliers of the model's input price. The ACPI catalog
 #: carries input/output prices only, so these come from the providers' own
 #: pricing pages, checked on this date:
