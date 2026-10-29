@@ -6,6 +6,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from ..config import settings
+from ..services import shadow
 from ..services.ratelimit import client_ip, rate_limited_response
 
 router = APIRouter()
@@ -47,6 +48,11 @@ async def health(request: Request) -> JSONResponse:
                 "dataset_version": acpi.version.isoformat() if acpi.version else None,
             },
             "ledger": app.state.db.stats.as_dict(),
+            "compression_shadow": {
+                "killed": shadow.killed,
+                "sample_rate": settings.shadow_sample_rate,
+                "dropped": shadow.dropped,
+            },
         },
     )
 

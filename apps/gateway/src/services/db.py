@@ -46,6 +46,7 @@ _COLUMNS_009 = (
     ("usage_records", "shadow_saving_tokens", "BIGINT"),
     ("usage_records", "shadow_saving_usd", "NUMERIC(16, 8)"),
     ("usage_records", "shadow_prefix_changed", "BOOLEAN"),
+    ("usage_records", "shadow_sample_rate", "REAL"),
     ("workspaces", "compression_shadow", "BOOLEAN NOT NULL DEFAULT FALSE"),
 )
 

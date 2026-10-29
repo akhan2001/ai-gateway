@@ -98,6 +98,9 @@ class Settings:
     compression_dedupe: bool = field(default_factory=lambda: _env("COMPRESSION_DEDUPE", "0") == "1")
     # Shadow estimates in flight; past this a row is written without one.
     shadow_max_inflight: int = field(default_factory=lambda: _env_int("SHADOW_MAX_INFLIGHT", 32))
+    # Share of opted-in requests that get a shadow estimate (0-1). Each row
+    # stores the rate so analytics can scale back up.
+    shadow_sample_rate: float = field(default_factory=lambda: _env_float("SHADOW_SAMPLE_RATE", 0.1))
 
     log_level: str = field(default_factory=lambda: _env("LOG_LEVEL", "INFO"))
 

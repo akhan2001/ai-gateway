@@ -53,6 +53,7 @@ LEDGER_COLUMNS = (
     "shadow_saving_tokens",
     "shadow_saving_usd",
     "shadow_prefix_changed",
+    "shadow_sample_rate",
 )
 
 
@@ -106,6 +107,7 @@ class UsageRecord:
     shadow_saving_tokens: int | None = None
     shadow_saving_usd: float | None = None
     shadow_prefix_changed: bool | None = None
+    shadow_sample_rate: float | None = None
 
     def as_tuple(self) -> tuple[Any, ...]:
         return tuple(getattr(self, column) for column in _FIELD_ORDER)

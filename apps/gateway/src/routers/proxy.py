@@ -12,6 +12,7 @@ import asyncio
 import dataclasses
 import json
 import logging
+import random
 import time
 import uuid
 from dataclasses import dataclass
@@ -454,15 +455,21 @@ def _record(
             output_cost_usd=priced.output_cost_usd if has_parts else None,
             prefix_cache_saving_usd=priced.prefix_cache_saving_usd if has_parts else None,
         )
-        # Past the in-flight cap the row is written without an estimate, so
-        # shadow totals become a sample (an undercount), never a backlog.
-        if (
+        sampled = (
             has_parts
             and principal.compression_shadow
             and not shadow.killed
-            and len(_background) < settings.shadow_max_inflight
-        ):
-            task = asyncio.create_task(_shadow_then_enqueue(app, record, payload, adapter, usage))
+            and random.random() < settings.shadow_sample_rate
+        )
+        # Past the in-flight cap the row is written without an estimate: an
+        # undercount, counted on /health, never a backlog.
+        if sampled and len(_background) >= settings.shadow_max_inflight:
+            shadow.dropped += 1
+            sampled = False
+        if sampled:
+            task = asyncio.create_task(
+                _shadow_then_enqueue(app, record, payload, adapter, usage, settings.shadow_sample_rate)
+            )
             _background.add(task)
             task.add_done_callback(_background.discard)
         else:
@@ -476,13 +483,18 @@ _background: set[asyncio.Task[None]] = set()
 
 
 async def _shadow_then_enqueue(
-    app: Any, record: UsageRecord, payload: dict[str, Any], adapter: ProviderAdapter, usage: Usage
+    app: Any,
+    record: UsageRecord,
+    payload: dict[str, Any],
+    adapter: ProviderAdapter,
+    usage: Usage,
+    sample_rate: float,
 ) -> None:
     """Compression shadow mode. Runs after the response has been handed back,
     on a worker thread so a large request can't stall the event loop, and only
     delays the ledger row, never the customer. The row is written either way."""
     try:
-        record = await asyncio.to_thread(_with_shadow, app.state.acpi, record, payload, adapter, usage)
+        record = await asyncio.to_thread(_with_shadow, app.state.acpi, record, payload, adapter, usage, sample_rate)
     except Exception as exc:
         # Type only: an exception message could quote the payload.
         log.error("compression shadow failed for request %s: %s", record.request_id, type(exc).__name__)
@@ -490,7 +502,12 @@ async def _shadow_then_enqueue(
 
 
 def _with_shadow(
-    catalog: Any, record: UsageRecord, payload: dict[str, Any], adapter: ProviderAdapter, usage: Usage
+    catalog: Any,
+    record: UsageRecord,
+    payload: dict[str, Any],
+    adapter: ProviderAdapter,
+    usage: Usage,
+    sample_rate: float,
 ) -> UsageRecord:
     estimate = shadow.estimate(
         payload,
@@ -511,4 +528,5 @@ def _with_shadow(
         shadow_saving_tokens=estimate.saving_tokens,
         shadow_saving_usd=saving_usd,
         shadow_prefix_changed=estimate.touches_cached_prefix,
+        shadow_sample_rate=sample_rate,
     )

@@ -110,15 +110,19 @@ def test_endpoints(monkeypatch, rows):
 
 def test_shadow_compares_compression_and_caching_on_the_same_requests():
     rows = [
-        {"feature": "support", "step": "triage", "requests": 120, "input_tokens": 1_000_000, "saving_tokens": 80_000,
-         "compression_usd": Decimal("0.12"), "caching_usd": Decimal("1.5"), "prefix_changed_requests": 3},
-        {"feature": "support", "step": "reply", "requests": 40, "input_tokens": 200_000, "saving_tokens": 0,
-         "compression_usd": Decimal("0"), "caching_usd": None, "prefix_changed_requests": 0},
+        {"feature": "support", "step": "triage", "sampled_requests": 12, "requests": Decimal("120.0"),
+         "input_tokens": Decimal("1000000.0"), "saving_tokens": Decimal("80000.0"), "compression_usd": Decimal("0.12"),
+         "caching_usd": Decimal("1.5"), "prefix_changed_requests": Decimal("30.0"), "unverified_pricing": True},
+        {"feature": "support", "step": "reply", "sampled_requests": 40, "requests": Decimal("40"),
+         "input_tokens": Decimal("200000"), "saving_tokens": Decimal("0"), "compression_usd": Decimal("0"),
+         "caching_usd": None, "prefix_changed_requests": 0, "unverified_pricing": False},
     ]
     out = build_shadow(True, rows)
     assert out["enabled"] and out["estimate"] and out["outputs_compared"] is False
     assert (out["compression_usd"], out["caching_usd"]) == (0.12, 1.5)
     assert out["steps"][1]["caching_usd"] == 0.0
+    assert (out["steps"][0]["requests"], out["steps"][0]["sampled_requests"]) == (120, 12)
+    assert out["unverified_pricing"] and not out["steps"][1]["unverified_pricing"]
 
 
 def test_shadow_endpoints(monkeypatch):

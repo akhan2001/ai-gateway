@@ -42,6 +42,10 @@ MIN_DEDUPE_CHARS = 200
 #: COMPRESSION_KILL and redeploy); move to Redis/DB if the gateway scales out.
 killed: bool = settings.compression_killed
 
+#: Sampled requests skipped because SHADOW_MAX_INFLIGHT was reached. Exposed on
+#: /health; since boot, per process.
+dropped: int = 0
+
 _TRAILING_SPACE = re.compile(r"[ \t]+$", re.MULTILINE)
 _BLANK_RUNS = re.compile(r"\n{3,}")
 

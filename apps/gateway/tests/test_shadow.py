@@ -141,6 +141,12 @@ def test_no_cache_saving_is_full_input_price(catalog):  # noqa: F811
 # --- through the proxy ------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def sample_everything(monkeypatch):
+    """Proxy tests measure every request; sampling has its own test."""
+    monkeypatch.setattr(proxy, "settings", dataclasses.replace(proxy.settings, shadow_sample_rate=1.0))
+
+
 class ShadowAuth(FakeAuth):
     async def authenticate(self, authorization):  # noqa: ANN001
         principal = await super().authenticate(authorization)
@@ -251,11 +257,30 @@ def test_kill_switch_stops_shadow_work(app, monkeypatch):  # noqa: F811
     assert row.cost_usd > 0 and row.shadow_saving_tokens is None
 
 
-def test_inflight_cap_writes_the_row_without_an_estimate(app, monkeypatch):  # noqa: F811
+def test_inflight_cap_writes_the_row_without_an_estimate_and_counts_it(app, monkeypatch):  # noqa: F811
     monkeypatch.setattr(proxy, "settings", dataclasses.replace(proxy.settings, shadow_max_inflight=0))
+    monkeypatch.setattr(shadow, "dropped", 0)
     app.state.auth = ShadowAuth(API_KEY)
     app.state.http = httpx.AsyncClient(transport=_upstream())
     with TestClient(app) as client:
         _send(app, client)
     (row,) = app.state.db.rows
     assert row.cost_usd > 0 and row.shadow_saving_tokens is None
+    assert shadow.dropped == 1
+
+
+def test_unsampled_requests_get_no_estimate_and_sampled_rows_carry_the_rate(app, monkeypatch):  # noqa: F811
+    app.state.auth = ShadowAuth(API_KEY)
+    app.state.http = httpx.AsyncClient(transport=_upstream())
+    monkeypatch.setattr(proxy, "settings", dataclasses.replace(proxy.settings, shadow_sample_rate=0.0))
+    with TestClient(app) as client:
+        _send(app, client)
+        (row,) = app.state.db.rows
+        assert row.shadow_saving_tokens is None and row.shadow_sample_rate is None
+        app.state.db.rows.clear()
+
+        monkeypatch.setattr(proxy, "settings", dataclasses.replace(proxy.settings, shadow_sample_rate=0.5))
+        monkeypatch.setattr(proxy.random, "random", lambda: 0.49)
+        _send(app, client)
+        row = _wait_for_row(app)
+    assert row.shadow_saving_tokens > 0 and row.shadow_sample_rate == 0.5
