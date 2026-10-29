@@ -49,7 +49,11 @@ async def health(request: Request) -> JSONResponse:
                 "dataset_version": acpi.version.isoformat() if acpi.version else None,
             },
             "ledger": app.state.db.stats.as_dict(),
-            "tokenize": {"queued": len(proxy._tokenizing), "dropped": tokenize.dropped},
+            "tokenize": {
+                "encodings": sorted(tokenize.ENCODINGS),
+                "queued": len(proxy._tokenizing),
+                "dropped": tokenize.dropped,
+            },
         },
     )
 

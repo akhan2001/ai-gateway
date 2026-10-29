@@ -135,3 +135,34 @@ def test_failure_keeps_the_estimate_and_logs_no_content(app, monkeypatch, caplog
     assert row.split_method == "estimate" and row.system_tokens is not None
     assert any("tokenizing failed" in r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR)
     assert all(SECRET not in r.getMessage() and not r.exc_info for r in caplog.records)
+
+
+# --- encodings come from the local cache only ------------------------------------
+
+
+def test_missing_encodings_never_download_and_never_raise(monkeypatch, tmp_path, caplog):
+    import requests
+    import tiktoken.load
+
+    def network(*args, **kwargs):  # noqa: ANN002, ANN003
+        raise AssertionError("tried to download an encoding at runtime")
+
+    monkeypatch.setattr(requests, "get", network)
+    monkeypatch.setenv("TIKTOKEN_CACHE_DIR", str(tmp_path))  # empty: nothing baked in
+    real = tiktoken.load.read_file
+
+    assert tokenize._load_cached("o200k_base") is None
+    assert tiktoken.load.read_file is real  # tiktoken left as it was
+    assert any("not cached" in r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR)
+
+
+def test_without_an_encoding_rows_keep_the_estimate(app, monkeypatch):  # noqa: F811
+    monkeypatch.setattr(tokenize, "ENCODINGS", {})
+    monkeypatch.setattr(tokenize, "dropped", 0)
+    assert not tokenize.available("openai", "gpt-4o-mini")
+    app.state.http = httpx.AsyncClient(transport=_upstream())
+    with TestClient(app) as client:
+        assert _send(client).status_code == 200
+        (row,) = app.state.db.rows  # written inline, no task queued
+    assert row.split_method == "estimate" and tokenize.dropped == 0
+    assert row.system_tokens + row.tool_tokens + row.history_tokens + row.user_tokens == 9000

@@ -297,3 +297,12 @@ async def test_migration_adds_only_missing_columns_under_a_lock_timeout():
         "SET LOCAL lock_timeout = '5s'",
         "ALTER TABLE usage_records ADD COLUMN IF NOT EXISTS system_tokens INTEGER",
     ]
+
+
+def test_missing_or_short_secret_means_no_hashing_never_a_default_key(caplog):
+    from src.services.anatomy import MIN_SECRET_BYTES, _load_secret
+
+    assert _load_secret("") == b""
+    assert _load_secret("x" * (MIN_SECRET_BYTES - 1)) == b""
+    assert sum(r.levelno >= logging.ERROR and "PREFIX_HASH_SECRET" in r.getMessage() for r in caplog.records) == 2
+    assert _load_secret("k" * 32) == b"k" * 32

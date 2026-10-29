@@ -459,7 +459,7 @@ def _record(
             cost_method_version=COST_METHOD_VERSION,
             split_method=split_method(adapter.name) if has_parts else None,
         )
-        if has_parts and adapter.name in tokenize.TOKENIZED_PROVIDERS:
+        if has_parts and tokenize.available(adapter.name, model_id):
             if len(_tokenizing) < settings.tokenize_max_queued:
                 task = asyncio.create_task(_tokenize_then_enqueue(app, record, payload, adapter, usage))
                 _tokenizing.add(task)

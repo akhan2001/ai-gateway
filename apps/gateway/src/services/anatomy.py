@@ -32,9 +32,25 @@ log = logging.getLogger(__name__)
 #:    PREFIX_HASH_SECRET. Not computable without the secret.
 PREFIX_HASH_VERSION = 2
 
-_SECRET = settings.prefix_hash_secret.encode()
-if not _SECRET:
-    log.warning("PREFIX_HASH_SECRET is not set; prefix hashes will not be recorded")
+#: Shorter than this is treated as unset: a guessable key makes the HMAC no
+#: better than the plain hash it replaced.
+MIN_SECRET_BYTES = 16
+
+
+def _load_secret(raw: str) -> bytes:
+    """The HMAC key, or b"" (no hashing at all) if it is missing or too short.
+    There is deliberately no default key."""
+    secret = raw.encode()
+    if len(secret) < MIN_SECRET_BYTES:
+        log.error(
+            "PREFIX_HASH_SECRET is %s; prefix hashes will not be recorded",
+            "not set" if not secret else f"under {MIN_SECRET_BYTES} bytes",
+        )
+        return b""
+    return secret
+
+
+_SECRET = _load_secret(settings.prefix_hash_secret)
 
 
 def prefix_hash(workspace_id: UUID, prefix: str) -> str | None:
