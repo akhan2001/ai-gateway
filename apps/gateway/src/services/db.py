@@ -41,6 +41,15 @@ _LEDGER_COLUMNS_008 = (
 )
 
 
+async def _ledger_columns_present(conn: asyncpg.Connection) -> set[str]:
+    return {
+        row["column_name"]
+        for row in await conn.fetch(
+            "SELECT column_name FROM information_schema.columns WHERE table_name = 'usage_records'"
+        )
+    }
+
+
 async def _apply_ledger_migration(conn: asyncpg.Connection) -> None:
     """Add any missing 008 columns.
 
@@ -52,12 +61,7 @@ async def _apply_ledger_migration(conn: asyncpg.Connection) -> None:
     next restart retries. Concurrent replicas are safe: Postgres serializes the
     ALTERs on that lock and IF NOT EXISTS makes the loser a no-op.
     """
-    present = {
-        row["column_name"]
-        for row in await conn.fetch(
-            "SELECT column_name FROM information_schema.columns WHERE table_name = 'usage_records'"
-        )
-    }
+    present = await _ledger_columns_present(conn)
     missing = [(name, kind) for name, kind in _LEDGER_COLUMNS_008 if name not in present]
     if not missing:
         return
@@ -74,6 +78,9 @@ class WriterStats:
     written: int = 0
     dropped: int = 0
     failed: int = 0
+    #: Ledger columns absent from the table (a migration failed): rows are
+    #: written without them. Should be 0; anything else needs a fix and a restart.
+    missing_columns: int = 0
 
     def as_dict(self) -> dict[str, int]:
         return {
@@ -81,6 +88,7 @@ class WriterStats:
             "written": self.written,
             "dropped": self.dropped,
             "failed": self.failed,
+            "missing_columns": self.missing_columns,
         }
 
 
@@ -103,18 +111,31 @@ class Database:
         self.stats = WriterStats()
         self._queue: asyncio.Queue[UsageRecord] | None = None
         self._task: asyncio.Task[None] | None = None
+        #: What the COPY names: LEDGER_COLUMNS minus any the table lacks.
+        self._columns: tuple[str, ...] = LEDGER_COLUMNS
 
     # -- lifecycle ----------------------------------------------------------
 
     async def start(self) -> None:
         self.pool = await asyncpg.create_pool(self._dsn, min_size=1, max_size=10)
-        # A failed migration must not stop the proxy: customer traffic matters
-        # more than ledger rows, which would fail to write until it's fixed.
-        try:
-            async with self.pool.acquire() as conn:
+        # A failed migration must not stop the proxy, and must not lose rows:
+        # the writer falls back to the columns the table actually has, so only
+        # the new fields go missing until it's fixed (see /health).
+        async with self.pool.acquire() as conn:
+            try:
                 await _apply_ledger_migration(conn)
-        except Exception:
-            log.exception("ledger migration 008_token_anatomy failed; ledger writes will fail")
+            except Exception:
+                log.exception("ledger migration 008_token_anatomy failed")
+            try:
+                present = await _ledger_columns_present(conn)
+            except Exception:
+                log.exception("could not read usage_records columns; writing all")
+                present = set(LEDGER_COLUMNS)
+        self._columns = tuple(c for c in LEDGER_COLUMNS if c in present)
+        missing = [c for c in LEDGER_COLUMNS if c not in present]
+        self.stats.missing_columns = len(missing)
+        if missing:
+            log.error("usage_records lacks %d ledger columns; writing rows without: %s", len(missing), ", ".join(missing))
         self._queue = asyncio.Queue(maxsize=self._queue_capacity)
         self._task = asyncio.create_task(self._drain_forever())
         log.info("database pool up, ledger writer started")
@@ -185,11 +206,11 @@ class Database:
     async def _write_batch(self, batch: list[UsageRecord]) -> None:
         if not batch or self.pool is None:
             return
-        records = [row.as_tuple() for row in batch]
+        records = [tuple(getattr(row, c) for c in self._columns) for row in batch]
         try:
             async with self.pool.acquire() as conn:
                 await conn.copy_records_to_table(
-                    "usage_records", records=records, columns=list(LEDGER_COLUMNS)
+                    "usage_records", records=records, columns=list(self._columns)
                 )
             self.stats.written += len(records)
         except Exception:
