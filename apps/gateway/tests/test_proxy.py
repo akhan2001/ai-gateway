@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from contextlib import asynccontextmanager
 
 import httpx
 import pytest
@@ -70,6 +71,13 @@ class FakeAuth:
         )
 
 
+@asynccontextmanager
+async def _drain_on_exit(app):  # noqa: ANN001
+    """Like main.py: rows still being tokenized land before the client closes."""
+    yield
+    await proxy.drain_background()
+
+
 @pytest.fixture()
 def app(tmp_path):
     path = tmp_path / "acpi_prices.json"
@@ -77,7 +85,7 @@ def app(tmp_path):
     catalog = AcpiCatalog(path, refresh_seconds=3600)
     catalog.load()
 
-    application = FastAPI()
+    application = FastAPI(lifespan=_drain_on_exit)
     application.include_router(proxy.router)
     application.state.acpi = catalog
     application.state.db = FakeDatabase()

@@ -200,6 +200,15 @@ def test_cache_write_rates():
     assert cache_rates("unknown", "m") == (1.0, 1.0)
 
 
+def wait_for_row(app):  # noqa: ANN001, F811
+    """OpenAI rows land after the response, once tokenized (services/tokenize)."""
+    deadline = time.monotonic() + 5
+    while not app.state.db.rows and time.monotonic() < deadline:
+        time.sleep(0.01)
+    (row,) = app.state.db.rows
+    return row
+
+
 # --- the hard rule: no content anywhere --------------------------------------
 
 
@@ -222,9 +231,9 @@ def test_no_prompt_or_completion_text_reaches_the_ledger_or_logs(app, caplog):  
             json=agent_payload(sentinel=SECRET),
             headers={"authorization": f"Bearer {API_KEY}"},
         )
+        row = wait_for_row(app)
     assert response.status_code == 200
 
-    (row,) = app.state.db.rows
     assert SECRET not in repr(row.as_tuple())
     assert all(SECRET not in record.getMessage() for record in caplog.records)
     # ...while the anatomy itself was captured and adds up.

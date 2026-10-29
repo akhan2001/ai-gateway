@@ -95,6 +95,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await app.state.redis.aclose()
         if app.state.ratelimit is not None:
             await app.state.ratelimit.aclose()
+        await proxy.drain_background()
         await app.state.db.stop()
         await app.state.acpi.stop()
         log.info("tokenix gateway stopped")

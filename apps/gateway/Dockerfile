@@ -9,6 +9,11 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# tiktoken downloads its encodings on first use. Bake them in so the gateway
+# never fetches at runtime (services/tokenize.py).
+ENV TIKTOKEN_CACHE_DIR=/app/tiktoken_cache
+RUN python -c "import tiktoken; [tiktoken.get_encoding(n) for n in ('o200k_base', 'cl100k_base')]"
+
 COPY src ./src
 
 # The ACPI dataset ships *in the image*. Compose bind-mounts a live copy over

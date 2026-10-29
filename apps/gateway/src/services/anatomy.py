@@ -64,9 +64,9 @@ def _size(value: Any) -> int:
     return len(json.dumps(value, separators=(",", ":"), ensure_ascii=False))
 
 
-def measure(payload: dict[str, Any], workspace_id: UUID, *, forwards_tools: bool) -> Anatomy:
-    """Measure an OpenAI-shaped request. `forwards_tools` is False for adapters
-    that drop tool definitions, since the provider never billed for them."""
+def sections(payload: dict[str, Any], *, forwards_tools: bool) -> tuple[list[Any], list[Any], list[Any], list[Any]]:
+    """(system, tools, history, latest turn) of an OpenAI-shaped request. The
+    one definition of the split, shared by the estimate and services/tokenize."""
     messages = [m for m in payload.get("messages") or [] if isinstance(m, dict)]
     system = [m for m in messages if m.get("role") in _SYSTEM_ROLES]
     conversation = [m for m in messages if m.get("role") not in _SYSTEM_ROLES]
@@ -79,7 +79,13 @@ def measure(payload: dict[str, Any], workspace_id: UUID, *, forwards_tools: bool
     tools = (payload.get("tools") or payload.get("functions") or []) if forwards_tools else []
     if not isinstance(tools, list):
         tools = []
+    return system, tools, history, latest
 
+
+def measure(payload: dict[str, Any], workspace_id: UUID, *, forwards_tools: bool) -> Anatomy:
+    """Measure an OpenAI-shaped request. `forwards_tools` is False for adapters
+    that drop tool definitions, since the provider never billed for them."""
+    system, tools, history, latest = sections(payload, forwards_tools=forwards_tools)
     prefix = json.dumps([system, tools], separators=(",", ":"), sort_keys=True, ensure_ascii=False)
     hashed = prefix_hash(workspace_id, prefix) if system or tools else None
 
@@ -95,17 +101,34 @@ def measure(payload: dict[str, Any], workspace_id: UUID, *, forwards_tools: bool
     )
 
 
-def split_tokens(anatomy: Anatomy, input_tokens: int) -> tuple[int, int, int, int]:
-    """(system, tools, history, user) tokens, summing exactly to `input_tokens`.
+#: Per-section tokens-per-character relative to the system prompt, from
+#: scripts/calibrate_anthropic_split.py (system, tools, history, latest). JSON
+#: tool schemas and prose tokenize at different rates, so equal weights
+#: misattribute tokens between sections. All 1.0 until the script has been run.
+ANTHROPIC_SECTION_WEIGHTS: tuple[float, float, float, float] = (1.0, 1.0, 1.0, 1.0)
 
-    Largest-remainder rounding, so no section drifts by more than one token
-    from its proportional share.
-    """
+
+def split_method(provider: str) -> str:
+    """How the in-request split was made: 'calibrated' when correction weights
+    apply, else 'estimate'. services/tokenize upgrades rows to 'tokenized'."""
+    return "calibrated" if provider == "anthropic" and set(ANTHROPIC_SECTION_WEIGHTS) != {1.0} else "estimate"
+
+
+def split_tokens(anatomy: Anatomy, input_tokens: int, provider: str = "") -> tuple[int, int, int, int]:
+    """(system, tools, history, user) tokens, summing exactly to `input_tokens`:
+    each section's share of serialized characters, weighted per provider."""
     chars = (anatomy.system_chars, anatomy.tool_chars, anatomy.history_chars, anatomy.user_chars)
-    total_chars = sum(chars)
-    if input_tokens <= 0 or total_chars == 0:
+    weights = ANTHROPIC_SECTION_WEIGHTS if provider == "anthropic" else (1.0, 1.0, 1.0, 1.0)
+    return scale_to_total(tuple(c * w for c, w in zip(chars, weights)), input_tokens)
+
+
+def scale_to_total(sizes: tuple[float, ...], input_tokens: int) -> tuple[int, int, int, int]:
+    """Apportion `input_tokens` over four sections by `sizes`. Largest-remainder
+    rounding, so no section drifts by more than one token from its share."""
+    total = sum(sizes)
+    if input_tokens <= 0 or total == 0:
         return (0, 0, 0, max(input_tokens, 0))
-    exact = [c * input_tokens / total_chars for c in chars]
+    exact = [c * input_tokens / total for c in sizes]
     parts = [int(x) for x in exact]
     by_remainder = sorted(range(4), key=lambda i: exact[i] - parts[i], reverse=True)
     for i in by_remainder[: input_tokens - sum(parts)]:

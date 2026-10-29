@@ -50,6 +50,7 @@ LEDGER_COLUMNS = (
     "prefix_cache_saving_usd",
     "cost_method_version",
     "prefix_hash_version",
+    "split_method",
 )
 
 
@@ -103,6 +104,10 @@ class UsageRecord:
     cost_method_version: int | None = None
     #: services/anatomy.py PREFIX_HASH_VERSION; NULL when there is no hash.
     prefix_hash_version: int | None = None
+    #: How the four section counts were made: 'estimate' (character share),
+    #: 'calibrated' (character share with per-section weights), 'tokenized'
+    #: (the model's tokenizer). NULL with no sections, or before sql/013.
+    split_method: str | None = None
 
     def as_tuple(self) -> tuple[Any, ...]:
         return tuple(getattr(self, column) for column in _FIELD_ORDER)

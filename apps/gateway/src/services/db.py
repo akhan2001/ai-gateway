@@ -43,6 +43,8 @@ _LEDGER_MIGRATION_COLUMNS = (
     ("cost_method_version", "SMALLINT"),
     # sql/011_prefix_hash_version.sql
     ("prefix_hash_version", "SMALLINT"),
+    # sql/013_split_method.sql
+    ("split_method", "TEXT"),
 )
 
 
@@ -56,7 +58,7 @@ async def _ledger_columns_present(conn: asyncpg.Connection) -> set[str]:
 
 
 async def _apply_ledger_migration(conn: asyncpg.Connection) -> None:
-    """Add any missing ledger columns (008, 010, 011).
+    """Add any missing ledger columns (008, 010, 011, 013).
 
     Checks first, because even ``ADD COLUMN IF NOT EXISTS`` takes an ACCESS
     EXCLUSIVE lock on the hypertable; doing that on every restart would stall

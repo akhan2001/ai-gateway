@@ -6,6 +6,8 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from ..config import settings
+from ..services import tokenize
+from . import proxy
 from ..services.ratelimit import client_ip, rate_limited_response
 
 router = APIRouter()
@@ -47,6 +49,7 @@ async def health(request: Request) -> JSONResponse:
                 "dataset_version": acpi.version.isoformat() if acpi.version else None,
             },
             "ledger": app.state.db.stats.as_dict(),
+            "tokenize": {"queued": len(proxy._tokenizing), "dropped": tokenize.dropped},
         },
     )
 

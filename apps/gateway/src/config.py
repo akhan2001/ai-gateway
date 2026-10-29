@@ -94,6 +94,11 @@ class Settings:
     # written. Rotating it splits every prompt into a new group, like a version bump.
     prefix_hash_secret: str = field(default_factory=lambda: _env("PREFIX_HASH_SECRET", ""))
 
+    # Exact section token counts (services/tokenize.py), after the response.
+    # Past the queue bound a row keeps the in-request estimate.
+    tokenize_max_queued: int = field(default_factory=lambda: _env_int("TOKENIZE_MAX_QUEUED", 256))
+    tokenize_workers: int = field(default_factory=lambda: _env_int("TOKENIZE_WORKERS", 2))
+
     log_level: str = field(default_factory=lambda: _env("LOG_LEVEL", "INFO"))
 
     # Rate limits, requests/minute. See services/ratelimit.py.

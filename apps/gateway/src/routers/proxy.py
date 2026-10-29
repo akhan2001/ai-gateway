@@ -8,10 +8,14 @@ logged and swallowed.
 
 from __future__ import annotations
 
+import asyncio
+import dataclasses
+import functools
 import json
 import logging
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, AsyncIterator
 
@@ -25,7 +29,8 @@ from ..providers.azure import AzureConfigError
 from ..providers.base import ProviderAdapter, StreamState
 from ..providers.registry import get_adapter, known_providers
 from ..services.acpi import utcnow
-from ..services.anatomy import PREFIX_HASH_VERSION, measure, split_tokens
+from ..services import tokenize
+from ..services.anatomy import PREFIX_HASH_VERSION, measure, scale_to_total, split_method, split_tokens
 from ..services.cost import COST_METHOD_VERSION, price_request
 from ..services.ratelimit import rate_limited_response
 from ..services.usage import Usage, usage_from_obj
@@ -399,7 +404,7 @@ def _record(
         anatomy = None
         if payload is not None and usage.input_tokens > 0:
             anatomy = measure(payload, principal.workspace_id, forwards_tools=adapter.forwards_tools)
-            sections = split_tokens(anatomy, usage.input_tokens)
+            sections = split_tokens(anatomy, usage.input_tokens, adapter.name)
         prefix_tokens = sections[0] + sections[1] if sections else 0
         priced = price_request(
             app.state.acpi, adapter.name, model_id, usage.input_tokens, usage.output_tokens,
@@ -409,51 +414,107 @@ def _record(
         )
         has_parts = priced.priced and sections is not None
         feature_tag, workload_tag = tags
-        app.state.db.enqueue(
-            UsageRecord(
-                request_id=request_id,
-                timestamp=utcnow(),
-                workspace_id=principal.workspace_id,
-                provider=adapter.name,
-                model_id=model_id,
-                feature_tag=feature_tag,
-                workload_tag=workload_tag,
-                session_id=session.session_id,
-                step_name=session.step_name,
-                session_name=session.session_name,
-                session_status=session.session_status,
-                auto_generated=session.auto_generated,
-                input_tokens=usage.input_tokens,
-                output_tokens=usage.output_tokens,
-                cached_input_tokens=usage.cached_input_tokens,
-                cost_usd=priced.cost_usd,
-                acpi_bench_usd=priced.acpi_bench_usd,
-                overpay_usd=priced.overpay_usd,
-                acpi_score=priced.acpi_score,
-                acpi_dataset_version=priced.dataset_version,
-                latency_ms=latency_ms
-                if latency_ms is not None
-                else int((time.monotonic() - started) * 1000),
-                status_code=status_code,
-                is_stream=is_stream,
-                priced=priced.priced,
-                system_tokens=sections[0] if sections else None,
-                tool_tokens=sections[1] if sections else None,
-                history_tokens=sections[2] if sections else None,
-                user_tokens=sections[3] if sections else None,
-                tool_count=anatomy.tool_count if anatomy else None,
-                cache_write_tokens=usage.cache_write_tokens if sections else None,
-                uncached_input_tokens=usage.uncached_input_tokens if sections else None,
-                max_output_tokens=anatomy.max_output_tokens if anatomy else None,
-                prefix_hash=anatomy.prefix_hash if anatomy else None,
-                prefix_hash_version=PREFIX_HASH_VERSION if anatomy and anatomy.prefix_hash else None,
-                uncached_input_cost_usd=priced.uncached_input_cost_usd if has_parts else None,
-                cache_write_cost_usd=priced.cache_write_cost_usd if has_parts else None,
-                cache_read_cost_usd=priced.cache_read_cost_usd if has_parts else None,
-                output_cost_usd=priced.output_cost_usd if has_parts else None,
-                prefix_cache_saving_usd=priced.prefix_cache_saving_usd if has_parts else None,
-                cost_method_version=COST_METHOD_VERSION,
-            )
+        record = UsageRecord(
+            request_id=request_id,
+            timestamp=utcnow(),
+            workspace_id=principal.workspace_id,
+            provider=adapter.name,
+            model_id=model_id,
+            feature_tag=feature_tag,
+            workload_tag=workload_tag,
+            session_id=session.session_id,
+            step_name=session.step_name,
+            session_name=session.session_name,
+            session_status=session.session_status,
+            auto_generated=session.auto_generated,
+            input_tokens=usage.input_tokens,
+            output_tokens=usage.output_tokens,
+            cached_input_tokens=usage.cached_input_tokens,
+            cost_usd=priced.cost_usd,
+            acpi_bench_usd=priced.acpi_bench_usd,
+            overpay_usd=priced.overpay_usd,
+            acpi_score=priced.acpi_score,
+            acpi_dataset_version=priced.dataset_version,
+            latency_ms=latency_ms
+            if latency_ms is not None
+            else int((time.monotonic() - started) * 1000),
+            status_code=status_code,
+            is_stream=is_stream,
+            priced=priced.priced,
+            system_tokens=sections[0] if sections else None,
+            tool_tokens=sections[1] if sections else None,
+            history_tokens=sections[2] if sections else None,
+            user_tokens=sections[3] if sections else None,
+            tool_count=anatomy.tool_count if anatomy else None,
+            cache_write_tokens=usage.cache_write_tokens if sections else None,
+            uncached_input_tokens=usage.uncached_input_tokens if sections else None,
+            max_output_tokens=anatomy.max_output_tokens if anatomy else None,
+            prefix_hash=anatomy.prefix_hash if anatomy else None,
+            prefix_hash_version=PREFIX_HASH_VERSION if anatomy and anatomy.prefix_hash else None,
+            uncached_input_cost_usd=priced.uncached_input_cost_usd if has_parts else None,
+            cache_write_cost_usd=priced.cache_write_cost_usd if has_parts else None,
+            cache_read_cost_usd=priced.cache_read_cost_usd if has_parts else None,
+            output_cost_usd=priced.output_cost_usd if has_parts else None,
+            prefix_cache_saving_usd=priced.prefix_cache_saving_usd if has_parts else None,
+            cost_method_version=COST_METHOD_VERSION,
+            split_method=split_method(adapter.name) if has_parts else None,
         )
+        if has_parts and adapter.name in tokenize.TOKENIZED_PROVIDERS:
+            if len(_tokenizing) < settings.tokenize_max_queued:
+                task = asyncio.create_task(_tokenize_then_enqueue(app, record, payload, adapter, usage))
+                _tokenizing.add(task)
+                task.add_done_callback(_tokenizing.discard)
+                return
+            # Full: the row keeps the in-request estimate, marked as such.
+            tokenize.dropped += 1
+        app.state.db.enqueue(record)
     except Exception:
         log.exception("failed to record usage for request %s", request_id)
+
+
+# Strong refs to queued tokenize tasks (the loop holds tasks weakly); its size
+# is the queue bound. The pool is the concurrency cap: tokenizing is CPU-bound
+# and must not take every default-executor thread from the rest of the gateway.
+_tokenizing: set[asyncio.Task[None]] = set()
+_tokenize_pool = ThreadPoolExecutor(max_workers=settings.tokenize_workers, thread_name_prefix="tokenize")
+
+
+async def drain_background(timeout: float = 5.0) -> None:
+    """At shutdown: let queued tokenize tasks write their rows before the
+    ledger's final flush. Past `timeout` the rest are lost with the process."""
+    if _tokenizing:
+        await asyncio.wait(set(_tokenizing), timeout=timeout)
+
+
+async def _tokenize_then_enqueue(
+    app: Any, record: UsageRecord, payload: dict[str, Any], adapter: ProviderAdapter, usage: Usage
+) -> None:
+    """Replace the estimated section split with tokenizer counts. Runs after
+    the response, so it only delays the ledger row; the row is written either
+    way, keeping the estimate if this fails."""
+    try:
+        counts = await asyncio.get_running_loop().run_in_executor(
+            _tokenize_pool,
+            functools.partial(tokenize.section_tokens, payload, record.model_id, forwards_tools=adapter.forwards_tools),
+        )
+        parts = scale_to_total(counts, usage.input_tokens)
+        # The caching saving is priced on the system + tools tokens, so re-price it.
+        priced = price_request(
+            app.state.acpi, adapter.name, record.model_id, usage.input_tokens, usage.output_tokens,
+            cache_read_tokens=usage.cached_input_tokens,
+            cache_write_tokens=usage.cache_write_tokens,
+            uncached_prefix_tokens=max(parts[0] + parts[1] - usage.cached_input_tokens, 0),
+        )
+        record = dataclasses.replace(
+            record,
+            system_tokens=parts[0],
+            tool_tokens=parts[1],
+            history_tokens=parts[2],
+            user_tokens=parts[3],
+            prefix_cache_saving_usd=priced.prefix_cache_saving_usd,
+            split_method="tokenized",
+        )
+    except Exception as exc:
+        # Type only: an exception message could quote the payload.
+        log.error("tokenizing failed for request %s: %s", record.request_id, type(exc).__name__)
+    app.state.db.enqueue(record)
