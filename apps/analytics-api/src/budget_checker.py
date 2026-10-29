@@ -69,6 +69,12 @@ async def _check_workspace(budget: dict) -> None:
     if limit <= 0:
         return
 
+    # Mixed cost methods: October 2026 sums rows priced at the full input rate
+    # (before the 2026-10-21 switch to net of caching) with rows priced net of
+    # it. The old rows read the same or higher, so this month's spend can be
+    # overstated and an alert fire early, never late. Counting only new-method
+    # rows would drop three weeks of real spend and fire late, which is worse.
+    # From 2026-11 every month is single-method.
     row = await db.fetchrow(
         """
         SELECT COALESCE(SUM(cost_usd), 0) AS spend
