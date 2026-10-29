@@ -162,3 +162,15 @@ def test_test_provider_key_unknown_provider(app):
             headers=_headers(),
         )
     assert response.status_code == 400
+
+
+def test_compression_kill_switch(app, monkeypatch):
+    from src.services import shadow
+
+    monkeypatch.setattr(shadow, "killed", False)
+    with TestClient(app) as client:
+        assert client.post("/admin/compression", json={"killed": True}).status_code == 401
+        assert shadow.killed is False
+        response = client.post("/admin/compression", json={"killed": True}, headers=_headers())
+    assert response.json() == {"killed": True}
+    assert shadow.killed is True

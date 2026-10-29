@@ -47,6 +47,20 @@ _LEDGER_MIGRATION_COLUMNS = (
     ("split_method", "TEXT"),
 )
 
+# sql/009_compression_shadow.sql.
+_COLUMNS_009 = (
+    ("usage_records", "shadow_compressed_tokens", "BIGINT"),
+    ("usage_records", "shadow_saving_tokens", "BIGINT"),
+    ("usage_records", "shadow_saving_usd", "NUMERIC(16, 8)"),
+    ("usage_records", "shadow_prefix_changed", "BOOLEAN"),
+    ("usage_records", "shadow_sample_rate", "REAL"),
+    ("workspaces", "compression_shadow", "BOOLEAN NOT NULL DEFAULT FALSE"),
+)
+
+# Everything _apply_ledger_migration adds, as (table, column, type). Order is
+# cosmetic: every column is nullable or has a constant default.
+_MIGRATION_COLUMNS = tuple(("usage_records", name, kind) for name, kind in _LEDGER_MIGRATION_COLUMNS) + _COLUMNS_009
+
 
 async def _ledger_columns_present(conn: asyncpg.Connection) -> set[str]:
     return {
@@ -58,7 +72,7 @@ async def _ledger_columns_present(conn: asyncpg.Connection) -> set[str]:
 
 
 async def _apply_ledger_migration(conn: asyncpg.Connection) -> None:
-    """Add any missing ledger columns (008, 010, 011, 013).
+    """Add any missing ledger columns (008, 009, 010, 011, 013).
 
     Checks first, because even ``ADD COLUMN IF NOT EXISTS`` takes an ACCESS
     EXCLUSIVE lock on the hypertable; doing that on every restart would stall
@@ -68,14 +82,20 @@ async def _apply_ledger_migration(conn: asyncpg.Connection) -> None:
     next restart retries. Concurrent replicas are safe: Postgres serializes the
     ALTERs on that lock and IF NOT EXISTS makes the loser a no-op.
     """
-    present = await _ledger_columns_present(conn)
-    missing = [(name, kind) for name, kind in _LEDGER_MIGRATION_COLUMNS if name not in present]
+    present = {
+        (row["table_name"], row["column_name"])
+        for row in await conn.fetch(
+            "SELECT table_name, column_name FROM information_schema.columns"
+            " WHERE table_name IN ('usage_records', 'workspaces')"
+        )
+    }
+    missing = [(table, name, kind) for table, name, kind in _MIGRATION_COLUMNS if (table, name) not in present]
     if not missing:
         return
     async with conn.transaction():
         await conn.execute("SET LOCAL lock_timeout = '5s'")
-        for name, kind in missing:
-            await conn.execute(f"ALTER TABLE usage_records ADD COLUMN IF NOT EXISTS {name} {kind}")
+        for table, name, kind in missing:
+            await conn.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {name} {kind}")
     log.info("ledger migrations added %d columns", len(missing))
 
 
@@ -232,7 +252,11 @@ class Database:
             return None
         row = await self.pool.fetchrow(
             """
-            SELECT k.id AS key_id, k.workspace_id, w.name AS workspace_name
+            SELECT k.id AS key_id, k.workspace_id, w.name AS workspace_name,
+                   -- Read via to_jsonb so a missing column (009 not applied
+                   -- yet) means "off" instead of failing every key lookup.
+                   COALESCE((to_jsonb(w) ->> 'compression_shadow')::boolean, FALSE)
+                       AS compression_shadow
             FROM api_keys k
             JOIN workspaces w ON w.id = k.workspace_id
             WHERE k.key_hash = $1 AND NOT k.revoked AND w.enabled

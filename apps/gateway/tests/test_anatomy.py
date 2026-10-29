@@ -255,12 +255,12 @@ def test_error_rows_carry_no_anatomy(app):  # noqa: F811
 
 
 class FakeConn:
-    def __init__(self, present: set[str]) -> None:
+    def __init__(self, present: set[tuple[str, str]]) -> None:
         self.present = present
         self.executed: list[str] = []
 
     async def fetch(self, query: str):
-        return [{"column_name": c} for c in self.present]
+        return [{"table_name": t, "column_name": c} for t, c in self.present]
 
     def transaction(self):
         conn = self
@@ -280,22 +280,23 @@ class FakeConn:
 
 @pytest.mark.asyncio
 async def test_migration_takes_no_lock_when_columns_exist():
-    from src.services.db import _LEDGER_MIGRATION_COLUMNS, _apply_ledger_migration
+    from src.services.db import _MIGRATION_COLUMNS, _apply_ledger_migration
 
-    conn = FakeConn({name for name, _ in _LEDGER_MIGRATION_COLUMNS})
+    conn = FakeConn({(table, name) for table, name, _ in _MIGRATION_COLUMNS})
     await _apply_ledger_migration(conn)
     assert conn.executed == []
 
 
 @pytest.mark.asyncio
 async def test_migration_adds_only_missing_columns_under_a_lock_timeout():
-    from src.services.db import _LEDGER_MIGRATION_COLUMNS, _apply_ledger_migration
+    from src.services.db import _MIGRATION_COLUMNS, _apply_ledger_migration
 
-    conn = FakeConn({name for name, _ in _LEDGER_MIGRATION_COLUMNS[1:]})
+    conn = FakeConn({(table, name) for table, name, _ in _MIGRATION_COLUMNS if name not in ("system_tokens", "compression_shadow")})
     await _apply_ledger_migration(conn)
     assert conn.executed == [
         "SET LOCAL lock_timeout = '5s'",
         "ALTER TABLE usage_records ADD COLUMN IF NOT EXISTS system_tokens INTEGER",
+        "ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS compression_shadow BOOLEAN NOT NULL DEFAULT FALSE",
     ]
 
 

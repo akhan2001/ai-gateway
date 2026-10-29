@@ -13,6 +13,7 @@ import dataclasses
 import functools
 import json
 import logging
+import random
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -29,9 +30,9 @@ from ..providers.azure import AzureConfigError
 from ..providers.base import ProviderAdapter, StreamState
 from ..providers.registry import get_adapter, known_providers
 from ..services.acpi import utcnow
-from ..services import tokenize
+from ..services import shadow, tokenize
 from ..services.anatomy import PREFIX_HASH_VERSION, measure, scale_to_total, split_method, split_tokens
-from ..services.cost import COST_METHOD_VERSION, price_request
+from ..services.cost import COST_METHOD_VERSION, input_saving_usd, price_request
 from ..services.ratelimit import rate_limited_response
 from ..services.usage import Usage, usage_from_obj
 
@@ -459,62 +460,139 @@ def _record(
             cost_method_version=COST_METHOD_VERSION,
             split_method=split_method(adapter.name) if has_parts else None,
         )
-        if has_parts and tokenize.available(adapter.name, model_id):
-            if len(_tokenizing) < settings.tokenize_max_queued:
-                task = asyncio.create_task(_tokenize_then_enqueue(app, record, payload, adapter, usage))
-                _tokenizing.add(task)
-                task.add_done_callback(_tokenizing.discard)
+        tokenizes = has_parts and tokenize.available(adapter.name, model_id)
+        sampled = (
+            has_parts
+            and principal.compression_shadow
+            and not shadow.killed
+            and random.random() < settings.shadow_sample_rate
+        )
+        # Past the shadow cap the row gets no shadow estimate: an undercount,
+        # counted on /health, never a backlog.
+        if sampled and len(_shadowing) >= settings.shadow_max_inflight:
+            shadow.dropped += 1
+            sampled = False
+        if tokenizes or sampled:
+            if len(_background) < settings.tokenize_max_queued:
+                task = asyncio.create_task(
+                    _finish_then_enqueue(
+                        app, record, payload, adapter, usage,
+                        tokenizes=tokenizes,
+                        shadow_rate=settings.shadow_sample_rate if sampled else None,
+                    )
+                )
+                _background.add(task)
+                task.add_done_callback(_background.discard)
+                if sampled:
+                    _shadowing.add(task)
+                    task.add_done_callback(_shadowing.discard)
                 return
-            # Full: the row keeps the in-request estimate, marked as such.
-            tokenize.dropped += 1
+            # Full: the row keeps the in-request estimate and gets no shadow figure.
+            tokenize.dropped += tokenizes
+            shadow.dropped += sampled
         app.state.db.enqueue(record)
     except Exception:
         log.exception("failed to record usage for request %s", request_id)
 
 
-# Strong refs to queued tokenize tasks (the loop holds tasks weakly); its size
-# is the queue bound. The pool is the concurrency cap: tokenizing is CPU-bound
-# and must not take every default-executor thread from the rest of the gateway.
-_tokenizing: set[asyncio.Task[None]] = set()
+# Strong refs to queued after-the-response tasks (the loop holds tasks
+# weakly); its size is the queue bound for all of them. _shadowing is the
+# subset doing a shadow estimate, under its own cap. The pool is the
+# tokenizer's concurrency cap: it is CPU-bound and must not take every
+# default-executor thread from the rest of the gateway.
+_background: set[asyncio.Task[None]] = set()
+_shadowing: set[asyncio.Task[None]] = set()
 _tokenize_pool = ThreadPoolExecutor(max_workers=settings.tokenize_workers, thread_name_prefix="tokenize")
 
 
 async def drain_background(timeout: float = 5.0) -> None:
-    """At shutdown: let queued tokenize tasks write their rows before the
-    ledger's final flush. Past `timeout` the rest are lost with the process."""
-    if _tokenizing:
-        await asyncio.wait(set(_tokenizing), timeout=timeout)
+    """At shutdown: let queued tasks write their rows before the ledger's
+    final flush. Past `timeout` the rest are lost with the process."""
+    if _background:
+        await asyncio.wait(set(_background), timeout=timeout)
 
 
-async def _tokenize_then_enqueue(
-    app: Any, record: UsageRecord, payload: dict[str, Any], adapter: ProviderAdapter, usage: Usage
+async def _finish_then_enqueue(
+    app: Any,
+    record: UsageRecord,
+    payload: dict[str, Any],
+    adapter: ProviderAdapter,
+    usage: Usage,
+    *,
+    tokenizes: bool,
+    shadow_rate: float | None,
 ) -> None:
-    """Replace the estimated section split with tokenizer counts. Runs after
-    the response, so it only delays the ledger row; the row is written either
-    way, keeping the estimate if this fails."""
-    try:
-        counts = await asyncio.get_running_loop().run_in_executor(
-            _tokenize_pool,
-            functools.partial(tokenize.section_tokens, payload, record.model_id, forwards_tools=adapter.forwards_tools),
-        )
-        parts = scale_to_total(counts, usage.input_tokens)
-        # The caching saving is priced on the system + tools tokens, so re-price it.
-        priced = price_request(
-            app.state.acpi, adapter.name, record.model_id, usage.input_tokens, usage.output_tokens,
-            cache_read_tokens=usage.cached_input_tokens,
-            cache_write_tokens=usage.cache_write_tokens,
-            uncached_prefix_tokens=max(parts[0] + parts[1] - usage.cached_input_tokens, 0),
-        )
-        record = dataclasses.replace(
-            record,
-            system_tokens=parts[0],
-            tool_tokens=parts[1],
-            history_tokens=parts[2],
-            user_tokens=parts[3],
-            prefix_cache_saving_usd=priced.prefix_cache_saving_usd,
-            split_method="tokenized",
-        )
-    except Exception as exc:
-        # Type only: an exception message could quote the payload.
-        log.error("tokenizing failed for request %s: %s", record.request_id, type(exc).__name__)
+    """After the response: tokenizer section counts, then the compression
+    shadow estimate, whichever apply. Only delays the ledger row, never the
+    customer. A step that fails leaves its fields as they were; the row is
+    written either way. Errors log the exception type only: a message could
+    quote the payload."""
+    if tokenizes:
+        try:
+            record = await _tokenized(app, record, payload, adapter, usage)
+        except Exception as exc:
+            log.error("tokenizing failed for request %s: %s", record.request_id, type(exc).__name__)
+    if shadow_rate is not None:
+        try:
+            record = await asyncio.to_thread(_with_shadow, app.state.acpi, record, payload, adapter, usage, shadow_rate)
+        except Exception as exc:
+            log.error("compression shadow failed for request %s: %s", record.request_id, type(exc).__name__)
     app.state.db.enqueue(record)
+
+
+async def _tokenized(
+    app: Any, record: UsageRecord, payload: dict[str, Any], adapter: ProviderAdapter, usage: Usage
+) -> UsageRecord:
+    """The row with its estimated section split replaced by tokenizer counts."""
+    counts = await asyncio.get_running_loop().run_in_executor(
+        _tokenize_pool,
+        functools.partial(tokenize.section_tokens, payload, record.model_id, forwards_tools=adapter.forwards_tools),
+    )
+    parts = scale_to_total(counts, usage.input_tokens)
+    # The caching saving is priced on the system + tools tokens, so re-price it.
+    priced = price_request(
+        app.state.acpi, adapter.name, record.model_id, usage.input_tokens, usage.output_tokens,
+        cache_read_tokens=usage.cached_input_tokens,
+        cache_write_tokens=usage.cache_write_tokens,
+        uncached_prefix_tokens=max(parts[0] + parts[1] - usage.cached_input_tokens, 0),
+    )
+    return dataclasses.replace(
+        record,
+        system_tokens=parts[0],
+        tool_tokens=parts[1],
+        history_tokens=parts[2],
+        user_tokens=parts[3],
+        prefix_cache_saving_usd=priced.prefix_cache_saving_usd,
+        split_method="tokenized",
+    )
+
+
+def _with_shadow(
+    catalog: Any,
+    record: UsageRecord,
+    payload: dict[str, Any],
+    adapter: ProviderAdapter,
+    usage: Usage,
+    sample_rate: float,
+) -> UsageRecord:
+    estimate = shadow.estimate(
+        payload,
+        usage.input_tokens,
+        usage.cached_input_tokens,
+        forwards_tools=adapter.forwards_tools,
+        dedupe_references=settings.compression_dedupe,
+    )
+    if estimate is None:
+        return record
+    saving_usd = input_saving_usd(
+        catalog, adapter.name, record.model_id, estimate.spans,
+        cache_read_tokens=usage.cached_input_tokens, cache_write_tokens=usage.cache_write_tokens,
+    )
+    return dataclasses.replace(
+        record,
+        shadow_compressed_tokens=estimate.compressed_tokens,
+        shadow_saving_tokens=estimate.saving_tokens,
+        shadow_saving_usd=saving_usd,
+        shadow_prefix_changed=estimate.touches_cached_prefix,
+        shadow_sample_rate=sample_rate,
+    )

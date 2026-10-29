@@ -58,6 +58,9 @@ class Principal:
     workspace_id: UUID
     workspace_name: str
     key_id: UUID
+    #: Opted in to compression shadow mode. Cached with the key, so a toggle
+    #: takes effect within key_cache_ttl_seconds.
+    compression_shadow: bool = False
 
 
 class _LocalCache:
@@ -117,6 +120,7 @@ class Authenticator:
                 workspace_id=row["workspace_id"],
                 workspace_name=row["workspace_name"],
                 key_id=row["key_id"],
+                compression_shadow=bool(row.get("compression_shadow")),
             )
             if row
             else None
@@ -151,6 +155,7 @@ class Authenticator:
                 workspace_id=UUID(payload["workspace_id"]),
                 workspace_name=payload["workspace_name"],
                 key_id=UUID(payload["key_id"]),
+                compression_shadow=bool(payload.get("compression_shadow")),
             )
         except (ValueError, KeyError, TypeError):
             return False, None
@@ -167,6 +172,7 @@ class Authenticator:
                     "workspace_id": str(principal.workspace_id),
                     "workspace_name": principal.workspace_name,
                     "key_id": str(principal.key_id),
+                    "compression_shadow": principal.compression_shadow,
                 }
             )
         )

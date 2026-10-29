@@ -48,6 +48,12 @@ LEDGER_COLUMNS = (
     "cache_read_cost_usd",
     "output_cost_usd",
     "prefix_cache_saving_usd",
+    # Compression shadow (sql/009). Only for workspaces with compression_shadow on.
+    "shadow_compressed_tokens",
+    "shadow_saving_tokens",
+    "shadow_saving_usd",
+    "shadow_prefix_changed",
+    "shadow_sample_rate",
     "cost_method_version",
     "prefix_hash_version",
     "split_method",
@@ -100,6 +106,11 @@ class UsageRecord:
     cache_read_cost_usd: float | None = None
     output_cost_usd: float | None = None
     prefix_cache_saving_usd: float | None = None
+    shadow_compressed_tokens: int | None = None
+    shadow_saving_tokens: int | None = None
+    shadow_saving_usd: float | None = None
+    shadow_prefix_changed: bool | None = None
+    shadow_sample_rate: float | None = None
     #: services/cost.py COST_METHOD_VERSION. NULL on rows from before sql/010.
     cost_method_version: int | None = None
     #: services/anatomy.py PREFIX_HASH_VERSION; NULL when there is no hash.

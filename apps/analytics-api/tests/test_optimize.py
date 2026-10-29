@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 from src import db as dbmod
 from src.auth import current_workspace
 from src.main import app
-from src.routes.optimize import MIN_REQUESTS, build_anatomy, build_recommendations
+from src.routes.optimize import MIN_REQUESTS, build_anatomy, build_recommendations, build_shadow
 
 WORKSPACE = uuid4()
 
@@ -112,3 +112,45 @@ def test_no_prefix_hashes_means_no_caching_claim():
     # PREFIX_HASH_SECRET unset at the gateway: stability is unknown, not perfect.
     kinds = [r["kind"] for r in build_recommendations(clean([group(distinct_prefixes=0)]), 30)["recommendations"]]
     assert "enable_caching" not in kinds
+
+
+def test_shadow_compares_compression_and_caching_on_the_same_requests():
+    rows = [
+        {"feature": "support", "step": "triage", "sampled_requests": 12, "requests": Decimal("120.0"),
+         "input_tokens": Decimal("1000000.0"), "saving_tokens": Decimal("80000.0"), "compression_usd": Decimal("0.12"),
+         "caching_usd": Decimal("1.5"), "prefix_changed_requests": Decimal("30.0"), "unverified_pricing": True},
+        {"feature": "support", "step": "reply", "sampled_requests": 40, "requests": Decimal("40"),
+         "input_tokens": Decimal("200000"), "saving_tokens": Decimal("0"), "compression_usd": Decimal("0"),
+         "caching_usd": None, "prefix_changed_requests": 0, "unverified_pricing": False},
+    ]
+    out = build_shadow(True, rows)
+    assert out["enabled"] and out["estimate"] and out["outputs_compared"] is False
+    assert (out["compression_usd"], out["caching_usd"]) == (0.12, 1.5)
+    assert out["steps"][1]["caching_usd"] == 0.0
+    assert (out["steps"][0]["requests"], out["steps"][0]["sampled_requests"]) == (120, 12)
+    assert out["unverified_pricing"] and not out["steps"][1]["unverified_pricing"]
+
+
+def test_shadow_endpoints(monkeypatch):
+    calls = []
+
+    async def fake_fetchrow(query: str, *args):
+        calls.append((query, args))
+        return {"enabled": True, "id": WORKSPACE}
+
+    async def fake_fetch(query: str, *args):
+        assert "shadow_saving_usd IS NOT NULL" in query and args == (WORKSPACE, 7)
+        return []
+
+    monkeypatch.setattr(dbmod.db, "fetchrow", fake_fetchrow)
+    monkeypatch.setattr(dbmod.db, "fetch", fake_fetch)
+    app.dependency_overrides[current_workspace] = lambda: WORKSPACE
+    try:
+        client = TestClient(app)
+        assert client.get("/api/v1/optimize/shadow").json()["enabled"] is True
+        assert client.post("/api/v1/optimize/shadow", json={"enabled": False}).json() == {"enabled": False}
+        assert client.post("/api/v1/optimize/shadow", json={"enabled": "maybe"}).status_code == 422
+    finally:
+        app.dependency_overrides.clear()
+    update_query, update_args = calls[-1]
+    assert "UPDATE workspaces SET compression_shadow" in update_query and update_args == (WORKSPACE, False)
