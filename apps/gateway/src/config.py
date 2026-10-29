@@ -90,6 +90,15 @@ class Settings:
         default_factory=lambda: _env_float("PROVIDER_CONNECT_TIMEOUT_SECONDS", 10.0)
     )
 
+    # Compression shadow mode. See services/shadow.py.
+    # Boot value of the kill switch; POST /admin/compression flips it live.
+    compression_killed: bool = field(default_factory=lambda: _env("COMPRESSION_KILL", "0") == "1")
+    # The duplicate-reference transform drops content the model would see, so
+    # it is off unless asked for.
+    compression_dedupe: bool = field(default_factory=lambda: _env("COMPRESSION_DEDUPE", "0") == "1")
+    # Shadow estimates in flight; past this a row is written without one.
+    shadow_max_inflight: int = field(default_factory=lambda: _env_int("SHADOW_MAX_INFLIGHT", 32))
+
     log_level: str = field(default_factory=lambda: _env("LOG_LEVEL", "INFO"))
 
     # Rate limits, requests/minute. See services/ratelimit.py.

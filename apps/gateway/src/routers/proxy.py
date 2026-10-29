@@ -454,7 +454,14 @@ def _record(
             output_cost_usd=priced.output_cost_usd if has_parts else None,
             prefix_cache_saving_usd=priced.prefix_cache_saving_usd if has_parts else None,
         )
-        if has_parts and principal.compression_shadow:
+        # Past the in-flight cap the row is written without an estimate, so
+        # shadow totals become a sample (an undercount), never a backlog.
+        if (
+            has_parts
+            and principal.compression_shadow
+            and not shadow.killed
+            and len(_background) < settings.shadow_max_inflight
+        ):
             task = asyncio.create_task(_shadow_then_enqueue(app, record, payload, adapter, usage))
             _background.add(task)
             task.add_done_callback(_background.discard)
@@ -486,7 +493,11 @@ def _with_shadow(
     catalog: Any, record: UsageRecord, payload: dict[str, Any], adapter: ProviderAdapter, usage: Usage
 ) -> UsageRecord:
     estimate = shadow.estimate(
-        payload, usage.input_tokens, usage.cached_input_tokens, forwards_tools=adapter.forwards_tools
+        payload,
+        usage.input_tokens,
+        usage.cached_input_tokens,
+        forwards_tools=adapter.forwards_tools,
+        dedupe_references=settings.compression_dedupe,
     )
     if estimate is None:
         return record

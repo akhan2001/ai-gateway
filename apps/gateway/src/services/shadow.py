@@ -9,8 +9,10 @@ The transforms are the Compression Lab's (demos/compression-lab/lib/compress.ts)
 ported to the OpenAI wire format the gateway speaks:
 
 * minify JSON in tool results (``role: "tool"``)
-* replace a later exact duplicate of >= 200 chars with a short reference
 * normalize whitespace (trailing spaces, runs of blank lines, outer trim)
+* only with ``dedupe_references`` (COMPRESSION_DEDUPE): replace a later exact
+  duplicate of >= 200 chars with a short reference. The other two keep every
+  word; this one removes content the model would have seen.
 
 All are prefix-stable: a message's output depends only on that message and the
 ones before it, so appending a turn never rewrites an earlier one and a
@@ -29,10 +31,16 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from ..config import settings
 from .anatomy import _SYSTEM_ROLES, _size
 
 #: Below this, a duplicate isn't worth replacing with a reference.
 MIN_DEDUPE_CHARS = 200
+
+#: Global kill switch: when True no shadow work runs for any workspace.
+#: ponytail: per process, so with several replicas flip each one (or set
+#: COMPRESSION_KILL and redeploy); move to Redis/DB if the gateway scales out.
+killed: bool = settings.compression_killed
 
 _TRAILING_SPACE = re.compile(r"[ \t]+$", re.MULTILINE)
 _BLANK_RUNS = re.compile(r"\n{3,}")
@@ -52,12 +60,12 @@ def _minify_json(text: str) -> str | None:
         return None
 
 
-def compress_messages(messages: list[Any]) -> list[Any]:
+def compress_messages(messages: list[Any], *, dedupe_references: bool = False) -> list[Any]:
     """The compressed copy of `messages`. The input is never mutated."""
     first_seen: dict[str, int] = {}
 
     def dedupe(text: str, number: int) -> str:
-        if len(text) < MIN_DEDUPE_CHARS:
+        if not dedupe_references or len(text) < MIN_DEDUPE_CHARS:
             return text
         first = first_seen.get(text)
         if first is not None:
@@ -101,7 +109,12 @@ class Shadow:
 
 
 def estimate(
-    payload: dict[str, Any], input_tokens: int, cache_read_tokens: int, *, forwards_tools: bool
+    payload: dict[str, Any],
+    input_tokens: int,
+    cache_read_tokens: int,
+    *,
+    forwards_tools: bool,
+    dedupe_references: bool = False,
 ) -> Shadow | None:
     messages = payload.get("messages")
     if not isinstance(messages, list) or input_tokens <= 0:
@@ -111,7 +124,7 @@ def estimate(
     conversation = [m for m in messages if not (isinstance(m, dict) and m.get("role") in _SYSTEM_ROLES)]
 
     original = [_size(m) for m in conversation]
-    compressed = [_size(m) for m in compress_messages(conversation)]
+    compressed = [_size(m) for m in compress_messages(conversation, dedupe_references=dedupe_references)]
     total_chars = _size(system) + (_size(tools) if isinstance(tools, list) else 0) + sum(original)
     if total_chars == 0:
         return None

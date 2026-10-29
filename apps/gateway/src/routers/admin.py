@@ -23,6 +23,7 @@ from ..config import settings
 from ..middleware.auth import generate_key, hash_key, key_display_prefix
 from ..providers.azure import AzureConfigError
 from ..providers.registry import get_adapter, known_providers
+from ..services import shadow
 from ..services.ratelimit import client_ip, rate_limited_response
 
 log = logging.getLogger(__name__)
@@ -399,3 +400,25 @@ async def test_provider_key(
         status_code=200,
         content={"success": False, "error": _provider_error_detail(response.status_code, response.content)},
     )
+
+
+class CompressionSwitch(BaseModel):
+    killed: bool
+
+
+@router.post("/compression")
+async def set_compression_kill(
+    body: CompressionSwitch,
+    request: Request,
+    x_admin_token: str | None = Header(default=None),
+) -> JSONResponse:
+    """Kill switch for all compression work, effective on the next request.
+    Bypasses the key cache, unlike the per-workspace toggle. Resets to
+    COMPRESSION_KILL on restart, so set that too to keep it off."""
+    if (limited := await _rate_limited(request)) is not None:
+        return limited
+    if not _authorized(x_admin_token):
+        return JSONResponse(status_code=401, content={"error": "unauthorized"})
+    shadow.killed = body.killed
+    log.warning("compression kill switch %s", "ON" if body.killed else "off")
+    return JSONResponse(status_code=200, content={"killed": shadow.killed})

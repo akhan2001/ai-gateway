@@ -4,6 +4,7 @@ no content stored, and nothing added to the request path."""
 from __future__ import annotations
 
 import copy
+import dataclasses
 import json
 import logging
 import time
@@ -13,6 +14,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from src.middleware.auth import Principal
+from src.routers import proxy
 from src.services import shadow
 from src.services.cost import input_saving_usd
 from src.services.shadow import compress_messages, estimate
@@ -66,9 +68,18 @@ def test_only_later_duplicates_become_references():
         {"role": "user", "content": block},
         {"role": "assistant", "content": "ok"},
         {"role": "user", "content": block},
-    ])
+    ], dedupe_references=True)
     assert out[0]["content"] == block
     assert out[2]["content"] == "[Duplicate omitted: identical to content in message 1.]"
+
+
+def test_dedupe_is_off_by_default():
+    messages = agent_conversation()
+    assert "Duplicate omitted" not in json.dumps(compress_messages(messages))
+    on = compress_messages(messages, dedupe_references=True)
+    assert "Duplicate omitted" in json.dumps(on)
+    for n in range(1, len(messages)):  # prefix-stable with it on, too
+        assert compress_messages(messages[:n], dedupe_references=True) == on[:n]
 
 
 def test_json_tool_results_are_minified_other_text_only_whitespace_normalized():
@@ -228,3 +239,23 @@ def test_shadow_failure_still_writes_the_row_and_logs_no_content(app, monkeypatc
     assert any("compression shadow failed" in r.getMessage() for r in caplog.records)
     assert all(SECRET not in r.getMessage() and not r.exc_info for r in caplog.records)
 
+
+
+def test_kill_switch_stops_shadow_work(app, monkeypatch):  # noqa: F811
+    monkeypatch.setattr(shadow, "killed", True)
+    app.state.auth = ShadowAuth(API_KEY)
+    app.state.http = httpx.AsyncClient(transport=_upstream())
+    with TestClient(app) as client:
+        _send(app, client)
+    (row,) = app.state.db.rows  # written inline, no shadow task
+    assert row.cost_usd > 0 and row.shadow_saving_tokens is None
+
+
+def test_inflight_cap_writes_the_row_without_an_estimate(app, monkeypatch):  # noqa: F811
+    monkeypatch.setattr(proxy, "settings", dataclasses.replace(proxy.settings, shadow_max_inflight=0))
+    app.state.auth = ShadowAuth(API_KEY)
+    app.state.http = httpx.AsyncClient(transport=_upstream())
+    with TestClient(app) as client:
+        _send(app, client)
+    (row,) = app.state.db.rows
+    assert row.cost_usd > 0 and row.shadow_saving_tokens is None
