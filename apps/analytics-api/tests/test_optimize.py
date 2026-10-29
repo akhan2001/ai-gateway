@@ -106,3 +106,9 @@ def test_endpoints(monkeypatch, rows):
     assert anatomy["days"] == 14 and anatomy["analyzed_requests"] == sum(r["requests"] for r in rows)
     assert recs["min_requests"] == MIN_REQUESTS
     assert bool(recs["recommendations"]) == bool(rows)
+
+
+def test_no_prefix_hashes_means_no_caching_claim():
+    # PREFIX_HASH_SECRET unset at the gateway: stability is unknown, not perfect.
+    kinds = [r["kind"] for r in build_recommendations(clean([group(distinct_prefixes=0)]), 30)["recommendations"]]
+    assert "enable_caching" not in kinds

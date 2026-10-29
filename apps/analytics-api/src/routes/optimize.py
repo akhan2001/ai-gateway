@@ -42,6 +42,7 @@ WITH r AS (
            cache_write_tokens, uncached_input_tokens,
            system_tokens, tool_tokens, history_tokens, user_tokens,
            tool_count, max_output_tokens, prefix_hash,
+           COALESCE(prefix_hash_version, 1) AS prefix_hash_version,
            uncached_input_cost_usd, cache_write_cost_usd, cache_read_cost_usd,
            output_cost_usd, prefix_cache_saving_usd
     FROM usage_records
@@ -66,7 +67,12 @@ SELECT r.feature, r.step, r.provider, r.model_id,
        SUM(r.history_tokens)                      AS history_tokens,
        SUM(r.user_tokens)                         AS user_tokens,
        AVG(r.tool_count)                          AS avg_tool_count,
-       COUNT(DISTINCT r.prefix_hash)              AS distinct_prefixes,
+       -- Hashes only match within a version (sql/011). Across a version
+       -- change one stable prompt has one hash per version, so count distinct
+       -- (version, hash) and take off one per extra version present.
+       COUNT(DISTINCT (r.prefix_hash_version, r.prefix_hash)) FILTER (WHERE r.prefix_hash IS NOT NULL)
+         - GREATEST(COUNT(DISTINCT r.prefix_hash_version) FILTER (WHERE r.prefix_hash IS NOT NULL) - 1, 0)
+                                                  AS distinct_prefixes,
        COUNT(*) FILTER (WHERE r.max_output_tokens IS NULL) AS no_output_limit,
        SUM(r.uncached_input_cost_usd)             AS uncached_input_usd,
        SUM(r.cache_write_cost_usd)                AS cache_write_usd,
@@ -150,7 +156,9 @@ def _recommendations_for(g: dict[str, Any]) -> list[dict[str, Any]]:
     usd_per_input_token = input_usd / input_tokens  # blended, after whatever caching already happens
     usd_per_output_token = g["output_usd"] / g["output_tokens"] if g["output_tokens"] else 0.0
     prefix_per_request = (g["system_tokens"] + g["tool_tokens"]) / n
-    stability = 1.0 - (max(g["distinct_prefixes"], 1) - 1) / n
+    # No hashes at all (PREFIX_HASH_SECRET unset) means unknown, not stable:
+    # 0 keeps the caching recommendation off instead of claiming the full saving.
+    stability = 1.0 - (g["distinct_prefixes"] - 1) / n if g["distinct_prefixes"] else 0.0
     hit_rate = g["cache_read_tokens"] / input_tokens
     recs: list[dict[str, Any]] = []
 

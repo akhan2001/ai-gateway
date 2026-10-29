@@ -25,7 +25,7 @@ from ..providers.azure import AzureConfigError
 from ..providers.base import ProviderAdapter, StreamState
 from ..providers.registry import get_adapter, known_providers
 from ..services.acpi import utcnow
-from ..services.anatomy import measure, split_tokens
+from ..services.anatomy import PREFIX_HASH_VERSION, measure, split_tokens
 from ..services.cost import COST_METHOD_VERSION, price_request
 from ..services.ratelimit import rate_limited_response
 from ..services.usage import Usage, usage_from_obj
@@ -446,6 +446,7 @@ def _record(
                 uncached_input_tokens=usage.uncached_input_tokens if sections else None,
                 max_output_tokens=anatomy.max_output_tokens if anatomy else None,
                 prefix_hash=anatomy.prefix_hash if anatomy else None,
+                prefix_hash_version=PREFIX_HASH_VERSION if anatomy and anatomy.prefix_hash else None,
                 uncached_input_cost_usd=priced.uncached_input_cost_usd if has_parts else None,
                 cache_write_cost_usd=priced.cache_write_cost_usd if has_parts else None,
                 cache_read_cost_usd=priced.cache_read_cost_usd if has_parts else None,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import statistics
@@ -86,6 +87,23 @@ def test_prefix_hash_is_stable_salted_and_ignores_the_conversation():
     other_system = json.loads(json.dumps(base))
     other_system["messages"][0]["content"] = "different"
     assert measure(base, WS, forwards_tools=True).prefix_hash != measure(other_system, WS, forwards_tools=True).prefix_hash
+
+
+def test_prefix_hash_needs_the_secret_and_is_not_the_old_plain_hash(monkeypatch):
+    from src.services import anatomy
+
+    payload = agent_payload()
+    hashed = measure(payload, WS, forwards_tools=True).prefix_hash
+    system = [m for m in payload["messages"] if m["role"] == "system"]
+    prefix = json.dumps([system, payload["tools"]], separators=(",", ":"), sort_keys=True, ensure_ascii=False)
+    # Version 1, recomputable by anyone holding the prompt:
+    assert hashed != hashlib.sha256(f"{WS}:{prefix}".encode()).hexdigest()[:16]
+    assert hashed == anatomy.prefix_hash(WS, prefix)
+
+    monkeypatch.setattr(anatomy, "_SECRET", b"another-secret")
+    assert anatomy.prefix_hash(WS, prefix) != hashed
+    monkeypatch.setattr(anatomy, "_SECRET", b"")
+    assert measure(payload, WS, forwards_tools=True).prefix_hash is None
 
 
 def test_measure_adds_well_under_5ms_p50():
@@ -213,6 +231,7 @@ def test_no_prompt_or_completion_text_reaches_the_ledger_or_logs(app, caplog):  
     assert row.system_tokens + row.tool_tokens + row.history_tokens + row.user_tokens == 9000
     assert (row.tool_count, row.uncached_input_tokens, row.cached_input_tokens) == (20, 3000, 6000)
     assert row.prefix_hash and len(row.prefix_hash) == 16
+    assert row.prefix_hash_version == 2
 
 
 def test_error_rows_carry_no_anatomy(app):  # noqa: F811
@@ -220,7 +239,7 @@ def test_error_rows_carry_no_anatomy(app):  # noqa: F811
     with TestClient(app) as client:
         client.post("/openai/v1/chat/completions", json=agent_payload(), headers={"authorization": f"Bearer {API_KEY}"})
     (row,) = app.state.db.rows
-    assert row.system_tokens is None and row.prefix_hash is None
+    assert row.system_tokens is None and row.prefix_hash is None and row.prefix_hash_version is None
 
 
 # --- startup migration -------------------------------------------------------

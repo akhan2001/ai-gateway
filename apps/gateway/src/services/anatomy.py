@@ -14,10 +14,34 @@ total is the provider's.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
+import logging
 from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
+
+from ..config import settings
+
+log = logging.getLogger(__name__)
+
+#: Stored with every prefix_hash; hashes of different versions never match.
+#: 1: SHA-256 of workspace id + prefix. Guessable: anyone can hash a common
+#:    system prompt and look for it. Nulled out by sql/012 once 30 days old.
+#: 2: HMAC-SHA256 of the prefix under a per-workspace key derived from
+#:    PREFIX_HASH_SECRET. Not computable without the secret.
+PREFIX_HASH_VERSION = 2
+
+_SECRET = settings.prefix_hash_secret.encode()
+if not _SECRET:
+    log.warning("PREFIX_HASH_SECRET is not set; prefix hashes will not be recorded")
+
+
+def prefix_hash(workspace_id: UUID, prefix: str) -> str | None:
+    if not _SECRET:
+        return None
+    tenant_key = hmac.new(_SECRET, workspace_id.bytes, hashlib.sha256).digest()
+    return hmac.new(tenant_key, prefix.encode(), hashlib.sha256).hexdigest()[:16]
 
 _SYSTEM_ROLES = {"system", "developer"}
 
@@ -57,7 +81,7 @@ def measure(payload: dict[str, Any], workspace_id: UUID, *, forwards_tools: bool
         tools = []
 
     prefix = json.dumps([system, tools], separators=(",", ":"), sort_keys=True, ensure_ascii=False)
-    prefix_hash = hashlib.sha256(f"{workspace_id}:{prefix}".encode()).hexdigest()[:16] if system or tools else None
+    hashed = prefix_hash(workspace_id, prefix) if system or tools else None
 
     max_tokens = payload.get("max_completion_tokens") or payload.get("max_tokens")
     return Anatomy(
@@ -66,7 +90,7 @@ def measure(payload: dict[str, Any], workspace_id: UUID, *, forwards_tools: bool
         history_chars=_size(history),
         user_chars=_size(latest),
         tool_count=len(tools),
-        prefix_hash=prefix_hash,
+        prefix_hash=hashed,
         max_output_tokens=max_tokens if isinstance(max_tokens, int) and not isinstance(max_tokens, bool) else None,
     )
 

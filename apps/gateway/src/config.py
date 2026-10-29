@@ -90,6 +90,10 @@ class Settings:
         default_factory=lambda: _env_float("PROVIDER_CONNECT_TIMEOUT_SECONDS", 10.0)
     )
 
+    # Key for prefix_hash (services/anatomy.py). Unset: no prefix hashes are
+    # written. Rotating it splits every prompt into a new group, like a version bump.
+    prefix_hash_secret: str = field(default_factory=lambda: _env("PREFIX_HASH_SECRET", ""))
+
     log_level: str = field(default_factory=lambda: _env("LOG_LEVEL", "INFO"))
 
     # Rate limits, requests/minute. See services/ratelimit.py.
