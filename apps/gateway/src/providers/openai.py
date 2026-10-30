@@ -15,6 +15,7 @@ from .base import ProviderAdapter, StreamState, TranslatedRequest
 
 class OpenAIAdapter(ProviderAdapter):
     name = "openai"
+    forwards_tools = True
     base_url = "https://api.openai.com"
 
     def build_request(

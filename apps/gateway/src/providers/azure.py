@@ -34,6 +34,7 @@ class AzureConfigError(ValueError):
 
 class AzureAdapter(ProviderAdapter):
     name = "azure"
+    forwards_tools = True
     # No fixed base_url: each workspace calls its own Azure resource.
     base_url = ""
 
